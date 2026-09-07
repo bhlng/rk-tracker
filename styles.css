@@ -441,6 +441,24 @@ button {
   box-shadow: 0 8px 24px rgba(0,0,0,0.4);
 }
 
+.input-suffix {
+  position: relative;
+}
+
+.input-suffix input {
+  padding-right: 48px;
+}
+
+.input-suffix .suffix {
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-faint);
+  font-size: 14px;
+  pointer-events: none;
+}
+
 .hint {
   font-size: 12px;
   color: var(--text-faint);

@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.2.1';
+  const APP_VERSION = '1.2.2';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
 
@@ -176,7 +176,7 @@
     const windowStart = rate.validFrom;
     const windowEnd = sorted[idx + 1] ? sorted[idx + 1].validFrom : null;
     return state.trips.filter(t => {
-      if (t.rateSource !== 'auto') return false;
+      if (t.rateSource === 'manual') return false; // missing rateSource (older trips) counts as auto
       const day = (t.startDateTime || '').slice(0, 10);
       if (!day || day < windowStart) return false;
       if (windowEnd && day >= windowEnd) return false;
@@ -657,8 +657,8 @@
         </div>
         <form id="rate-form" style="padding: 4px 18px 20px;">
           <div class="field">
-            <label for="rate-amount-input">Betrag in €/km</label>
-            <input type="text" inputmode="decimal" id="rate-amount-input" placeholder="0,40" value="${escapeHtml(currentVal)}" enterkeyhint="done">
+            <label for="rate-amount-input">Betrag pro Kilometer</label>
+            <div class="input-suffix"><input type="text" inputmode="decimal" id="rate-amount-input" placeholder="0,40" value="${escapeHtml(currentVal)}" enterkeyhint="done"><span class="suffix">€/km</span></div>
           </div>
           <button type="submit" class="btn-primary" id="rate-save">Speichern</button>
           ${draft.rateSource === 'manual' ? '<button type="button" class="btn-secondary" id="rate-reset" style="width:100%;margin-top:10px;">Automatisch verwenden</button>' : ''}
@@ -923,7 +923,7 @@
           <label>Neuer Satz</label>
           <div class="two-col">
             <input type="date" id="new-rate-date" value="${escapeHtml(todayDateStr())}">
-            <input type="text" inputmode="decimal" id="new-rate-amount" placeholder="0,40">
+            <div class="input-suffix"><input type="text" inputmode="decimal" id="new-rate-amount" placeholder="0,40"><span class="suffix">€/km</span></div>
           </div>
           <div class="hint">Betrag in Euro pro Kilometer, gültig ab dem gewählten Datum. Bei rückwirkenden Änderungen fragen wir nach, ob bereits erfasste Fahrten angepasst werden sollen.</div>
         </div>
@@ -1004,6 +1004,18 @@
   }
 
   document.getElementById('app-version').textContent = 'v' + APP_VERSION;
+
+  // Backfill cost for trips saved before the rate feature existed, or before a rate was configured.
+  (function backfillCosts() {
+    let changed = false;
+    for (const t of state.trips) {
+      if (t.rateSource !== 'manual' && t.cost == null) {
+        computeCost(t);
+        if (t.cost != null) changed = true;
+      }
+    }
+    if (changed) saveKey('trips');
+  })();
 
   render();
   retryAllPending();
