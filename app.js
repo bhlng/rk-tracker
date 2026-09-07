@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.2.2';
+  const APP_VERSION = '1.2.3';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
 
@@ -862,7 +862,7 @@
               <span class="trip-route">${escapeHtml(locationLabel(trip.startLocationId))} → ${escapeHtml(locationLabel(trip.endLocationId))}</span>
               <span class="trip-km">${distText}</span>
             </div>
-            <div class="trip-meta">${formatDateTime(trip.startDateTime)}${trip.endDateTime ? ' – ' + formatDateTime(trip.endDateTime) : ''} · ${escapeHtml(trip.vehiclePlate)}</div>
+            <div class="trip-meta">${formatDateTime(trip.startDateTime)}${trip.endDateTime ? ' – ' + formatDateTime(trip.endDateTime) : ''} · ${escapeHtml(trip.vehiclePlate)}${trip.ratePerKm != null ? ' · ' + formatEuroPerKm(trip.ratePerKm) : ''}</div>
             ${trip.note ? `<div class="trip-note">${escapeHtml(trip.note)}</div>` : ''}
             ${trip.distanceStatus === 'pending' ? `<div class="hint">${escapeHtml(trip.distanceError || 'Distanz wird nachgeholt, sobald Internet verfügbar ist.')}</div>` : ''}
             ${trip.distanceStatus === 'ok' && trip.cost == null ? `<div class="hint">Kein Kilometersatz für dieses Datum hinterlegt.</div>` : ''}
