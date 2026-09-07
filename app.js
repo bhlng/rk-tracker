@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.1.0';
+  const APP_VERSION = '1.2.0';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
 
@@ -10,6 +10,7 @@
     locations: [],
     vehicles: [],
     routeCache: {},
+    rates: [],
     settings: { orsApiKey: '' }
   };
 
@@ -33,6 +34,7 @@
     locations: loadKey('locations'),
     vehicles: loadKey('vehicles'),
     routeCache: loadKey('routeCache'),
+    rates: loadKey('rates'),
     settings: loadKey('settings')
   };
 
@@ -41,7 +43,7 @@
   let draft = makeEmptyDraft();
 
   function makeEmptyDraft() {
-    return {
+    const d = {
       startLocationId: null,
       endLocationId: null,
       distanceKm: null,
@@ -50,8 +52,13 @@
       startDateTime: toDatetimeLocalValue(new Date()),
       endDateTime: '',
       vehiclePlate: '',
-      note: ''
+      note: '',
+      ratePerKm: null,
+      rateSource: 'auto', // auto | manual
+      cost: null
     };
+    computeCost(d);
+    return d;
   }
 
   function uid() {
@@ -71,6 +78,27 @@
     const d = new Date(value);
     if (isNaN(d)) return value;
     return d.toLocaleString('de-CH', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
+  function formatEuro(amount) {
+    if (amount == null || isNaN(amount)) return '';
+    return amount.toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
+  }
+
+  function formatEuroPerKm(amount) {
+    if (amount == null || isNaN(amount)) return '';
+    return `${amount.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €/km`;
+  }
+
+  function formatDateOnly(dayStr) {
+    if (!dayStr) return '';
+    const [y, m, d] = dayStr.split('-');
+    return `${d}.${m}.${y}`;
+  }
+
+  function todayDateStr() {
+    const d = new Date();
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   }
 
   function escapeHtml(str) {
@@ -112,6 +140,90 @@
     if (vehicle) { vehicle.usageCount = (vehicle.usageCount || 0) + 1; vehicle.lastUsedAt = t; }
     saveKey('locations');
     saveKey('vehicles');
+  }
+
+  // ---------- Kilometersatz / Kosten ----------
+  function findApplicableRate(dateTimeStr) {
+    const day = (dateTimeStr || '').slice(0, 10);
+    if (!day) return null;
+    const sorted = [...state.rates].sort((a, b) => a.validFrom.localeCompare(b.validFrom));
+    let applicable = null;
+    for (const r of sorted) {
+      if (r.validFrom <= day) applicable = r; else break;
+    }
+    return applicable;
+  }
+
+  // Mutates `entry` (a trip or the draft): resolves ratePerKm (unless manually overridden)
+  // and (re)computes cost from the current distanceKm. Safe to call any time.
+  function computeCost(entry) {
+    if (entry.rateSource !== 'manual') {
+      const r = findApplicableRate(entry.startDateTime);
+      entry.ratePerKm = r ? r.amount : null;
+      entry.rateSource = 'auto';
+    }
+    if (entry.distanceStatus === 'ok' && entry.distanceKm != null && entry.ratePerKm != null) {
+      entry.cost = Math.round(entry.distanceKm * entry.ratePerKm * 100) / 100;
+    } else {
+      entry.cost = null;
+    }
+  }
+
+  // Trips whose auto-resolved rate changes because of `rate` (already inserted into state.rates).
+  function affectedTripsForRate(rate) {
+    const sorted = [...state.rates].sort((a, b) => a.validFrom.localeCompare(b.validFrom));
+    const idx = sorted.findIndex(r => r.id === rate.id);
+    const windowStart = rate.validFrom;
+    const windowEnd = sorted[idx + 1] ? sorted[idx + 1].validFrom : null;
+    return state.trips.filter(t => {
+      if (t.rateSource !== 'auto') return false;
+      const day = (t.startDateTime || '').slice(0, 10);
+      if (!day || day < windowStart) return false;
+      if (windowEnd && day >= windowEnd) return false;
+      return t.ratePerKm !== rate.amount;
+    });
+  }
+
+  async function addRate() {
+    const dateVal = document.getElementById('new-rate-date').value;
+    const amountVal = parseFloat(document.getElementById('new-rate-amount').value.replace(',', '.'));
+    if (!dateVal || isNaN(amountVal) || amountVal <= 0) {
+      toast('Bitte gültiges Datum und Betrag angeben');
+      return;
+    }
+    const existingIdx = state.rates.findIndex(r => r.validFrom === dateVal);
+    const rate = { id: existingIdx >= 0 ? state.rates[existingIdx].id : uid(), validFrom: dateVal, amount: amountVal };
+    if (existingIdx >= 0) state.rates[existingIdx] = rate; else state.rates.push(rate);
+    saveKey('rates');
+
+    const affected = affectedTripsForRate(rate);
+    if (affected.length) {
+      const n = affected.length;
+      const msg = `${n} bereits erfasste ${n === 1 ? 'Fahrt fällt' : 'Fahrten fallen'} in den Zeitraum ab ${formatDateOnly(dateVal)}. Auf ${formatEuroPerKm(amountVal)} aktualisieren?`;
+      const ok = await confirmDialog(msg, 'Aktualisieren');
+      for (const t of affected) {
+        if (ok) {
+          computeCost(t); // auto: re-resolves and picks up the new rate
+        } else {
+          t.rateSource = 'manual'; // pin at the previous rate, don't let future changes touch it
+        }
+      }
+      saveKey('trips');
+    }
+    toast('Kilometersatz gespeichert');
+    render();
+  }
+
+  async function deleteRate(id) {
+    const ok = await confirmDialog('Diesen Kilometersatz löschen?');
+    if (!ok) return;
+    state.rates = state.rates.filter(r => r.id !== id);
+    saveKey('rates');
+    for (const t of state.trips) {
+      if (t.rateSource === 'auto') computeCost(t);
+    }
+    saveKey('trips');
+    render();
   }
 
   // ---------- Routing (OpenRouteService) ----------
@@ -160,6 +272,7 @@
       entry.distanceStatus = 'empty';
       entry.distanceKm = null;
       entry.distanceError = null;
+      computeCost(entry);
       return;
     }
     const key = routeKey(entry.startLocationId, entry.endLocationId);
@@ -168,6 +281,7 @@
       entry.distanceKm = cached.km;
       entry.distanceStatus = 'ok';
       entry.distanceError = null;
+      computeCost(entry);
       return;
     }
     entry.distanceStatus = 'pending';
@@ -186,6 +300,7 @@
       entry.distanceKm = null;
       entry.distanceError = (e && e.message === 'no-key') ? 'Kein API-Key hinterlegt' : 'Distanz konnte nicht berechnet werden';
     }
+    computeCost(entry);
   }
 
   async function retryAllPending() {
@@ -278,6 +393,8 @@
         endDateTime: draft.endDateTime,
         vehiclePlate: draft.vehiclePlate,
         note: draft.note,
+        ratePerKm: draft.ratePerKm,
+        rateSource: draft.rateSource,
         updatedAt: nowIso()
       });
       if (routeChanged) {
@@ -286,6 +403,7 @@
         trip.distanceError = null;
       }
       bumpUsage(startLoc, endLoc, veh);
+      computeCost(trip);
       saveKey('trips');
       if (trip.distanceStatus !== 'ok') {
         await calcDistance(trip);
@@ -304,11 +422,15 @@
         endDateTime: draft.endDateTime,
         vehiclePlate: draft.vehiclePlate,
         note: draft.note,
+        ratePerKm: draft.ratePerKm,
+        rateSource: draft.rateSource,
+        cost: draft.cost,
         createdAt: nowIso(),
         updatedAt: nowIso()
       };
       state.trips.push(trip);
       bumpUsage(startLoc, endLoc, veh);
+      computeCost(trip);
       saveKey('trips');
       if (trip.distanceStatus !== 'ok') {
         await calcDistance(trip);
@@ -335,7 +457,10 @@
       startDateTime: trip.startDateTime,
       endDateTime: trip.endDateTime,
       vehiclePlate: trip.vehiclePlate,
-      note: trip.note
+      note: trip.note,
+      ratePerKm: trip.ratePerKm != null ? trip.ratePerKm : null,
+      rateSource: trip.rateSource || 'auto',
+      cost: trip.cost != null ? trip.cost : null
     };
     currentView = 'new';
     render();
@@ -517,6 +642,54 @@
     });
   }
 
+  function openRateEditor() {
+    closeSheet();
+    const backdrop = document.createElement('div');
+    backdrop.id = 'sheet-backdrop';
+    backdrop.className = 'sheet-backdrop';
+    const currentVal = draft.ratePerKm != null ? String(draft.ratePerKm).replace('.', ',') : '';
+    backdrop.innerHTML = `
+      <div class="sheet" role="dialog">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+          <h2>Kilometersatz für diese Fahrt</h2>
+          <button class="btn-text" id="sheet-close">Abbrechen</button>
+        </div>
+        <form id="rate-form" style="padding: 4px 18px 20px;">
+          <div class="field">
+            <label for="rate-amount-input">Betrag in €/km</label>
+            <input type="text" inputmode="decimal" id="rate-amount-input" placeholder="0,40" value="${escapeHtml(currentVal)}" enterkeyhint="done">
+          </div>
+          <button type="submit" class="btn-primary" id="rate-save">Speichern</button>
+          ${draft.rateSource === 'manual' ? '<button type="button" class="btn-secondary" id="rate-reset" style="width:100%;margin-top:10px;">Automatisch verwenden</button>' : ''}
+        </form>
+      </div>
+    `;
+    document.body.appendChild(backdrop);
+    backdrop.querySelector('#sheet-close').addEventListener('click', closeSheet);
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeSheet(); });
+    backdrop.querySelector('#rate-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const val = parseFloat(backdrop.querySelector('#rate-amount-input').value.replace(',', '.'));
+      if (isNaN(val) || val <= 0) { toast('Bitte einen gültigen Betrag angeben'); return; }
+      draft.ratePerKm = val;
+      draft.rateSource = 'manual';
+      computeCost(draft);
+      closeSheet();
+      render();
+    });
+    const resetBtn = backdrop.querySelector('#rate-reset');
+    if (resetBtn) {
+      resetBtn.addEventListener('click', () => {
+        draft.rateSource = 'auto';
+        computeCost(draft);
+        closeSheet();
+        render();
+      });
+    }
+    setTimeout(() => backdrop.querySelector('#rate-amount-input').focus(), 50);
+  }
+
   // ---------- Settings ----------
   function saveApiKey() {
     const input = document.getElementById('ors-key-input');
@@ -561,6 +734,17 @@
     return `<div class="distance-box"><span class="distance-value pending">Wird berechnet…</span></div>`;
   }
 
+  function rateBoxHtml(entry) {
+    const label = entry.ratePerKm != null
+      ? `${formatEuroPerKm(entry.ratePerKm)} <span class="hint" style="margin:0;display:inline;">(${entry.rateSource === 'manual' ? 'manuell' : 'automatisch'})</span>`
+      : '<span class="placeholder">Kein Satz hinterlegt</span>';
+    const costLine = entry.cost != null ? `<div class="hint">Kosten dieser Fahrt: ${formatEuro(entry.cost)}</div>` : '';
+    return `<div class="distance-box">
+        <span class="distance-value">${label}</span>
+        <button class="retry-btn" id="btn-edit-rate">Ändern</button>
+      </div>${costLine}`;
+  }
+
   function renderNewView() {
     const startLoc = draft.startLocationId ? findLocation(draft.startLocationId) : null;
     const endLoc = draft.endLocationId ? findLocation(draft.endLocationId) : null;
@@ -597,6 +781,10 @@
           </div>
         </div>
         <div class="field">
+          <label>Kilometersatz</label>
+          ${rateBoxHtml(draft)}
+        </div>
+        <div class="field">
           <label>Fahrzeug</label>
           <button class="picker-trigger" id="btn-pick-vehicle">
             <span class="${draft.vehiclePlate ? '' : 'placeholder'}">${draft.vehiclePlate ? escapeHtml(draft.vehiclePlate) : 'Kennzeichen wählen'}</span>
@@ -622,8 +810,13 @@
     const cancelBtn = document.getElementById('btn-cancel-edit');
     if (cancelBtn) cancelBtn.addEventListener('click', cancelEdit);
 
-    document.getElementById('input-start-dt').addEventListener('change', (e) => { draft.startDateTime = e.target.value; });
+    document.getElementById('input-start-dt').addEventListener('change', (e) => {
+      draft.startDateTime = e.target.value;
+      computeCost(draft);
+      render();
+    });
     document.getElementById('input-end-dt').addEventListener('change', (e) => { draft.endDateTime = e.target.value; });
+    document.getElementById('btn-edit-rate').addEventListener('click', openRateEditor);
     const noteEl = document.getElementById('input-note');
     noteEl.addEventListener('input', (e) => {
       draft.note = e.target.value;
@@ -640,32 +833,47 @@
     }
     const sorted = [...state.trips].sort((a, b) => (b.startDateTime || '').localeCompare(a.startDateTime || ''));
     let html = '';
-    let lastYear = null;
+
+    // Group by year first so each year's header can show its total.
+    const years = [];
+    const byYear = {};
     for (const trip of sorted) {
       const year = trip.startDateTime ? trip.startDateTime.slice(0, 4) : '—';
-      if (year !== lastYear) {
-        html += `<div class="section-title">${escapeHtml(year)}</div>`;
-        lastYear = year;
+      if (!byYear[year]) { byYear[year] = []; years.push(year); }
+      byYear[year].push(trip);
+    }
+
+    for (const year of years) {
+      const tripsOfYear = byYear[year];
+      const sum = tripsOfYear.reduce((acc, t) => acc + (t.cost != null ? t.cost : 0), 0);
+      const missing = tripsOfYear.filter(t => t.cost == null).length;
+      const sumText = missing < tripsOfYear.length
+        ? `Summe: ${formatEuro(sum)}${missing ? ` (${missing} ohne Kosten)` : ''}`
+        : 'Summe: —';
+      html += `<div class="section-title" style="display:flex; justify-content:space-between; align-items:baseline;"><span>${escapeHtml(year)}</span><span>${sumText}</span></div>`;
+
+      for (const trip of tripsOfYear) {
+        const distText = trip.distanceStatus === 'ok'
+          ? `${trip.distanceKm} km${trip.cost != null ? ' · ' + formatEuro(trip.cost) : ''}`
+          : (trip.distanceStatus === 'pending' ? '…' : '');
+        html += `
+          <div class="trip-card">
+            <div class="trip-row-top">
+              <span class="trip-route">${escapeHtml(locationLabel(trip.startLocationId))} → ${escapeHtml(locationLabel(trip.endLocationId))}</span>
+              <span class="trip-km">${distText}</span>
+            </div>
+            <div class="trip-meta">${formatDateTime(trip.startDateTime)}${trip.endDateTime ? ' – ' + formatDateTime(trip.endDateTime) : ''} · ${escapeHtml(trip.vehiclePlate)}</div>
+            ${trip.note ? `<div class="trip-note">${escapeHtml(trip.note)}</div>` : ''}
+            ${trip.distanceStatus === 'pending' ? `<div class="hint">${escapeHtml(trip.distanceError || 'Distanz wird nachgeholt, sobald Internet verfügbar ist.')}</div>` : ''}
+            ${trip.distanceStatus === 'ok' && trip.cost == null ? `<div class="hint">Kein Kilometersatz für dieses Datum hinterlegt.</div>` : ''}
+            <div class="trip-actions">
+              <button class="btn-text" data-edit="${escapeHtml(trip.id)}">Bearbeiten</button>
+              ${trip.distanceStatus === 'pending' ? `<button class="btn-text" data-retry="${escapeHtml(trip.id)}">Distanz erneut versuchen</button>` : ''}
+              <button class="btn-danger" data-delete="${escapeHtml(trip.id)}">Löschen</button>
+            </div>
+          </div>
+        `;
       }
-      const distText = trip.distanceStatus === 'ok'
-        ? `${trip.distanceKm} km`
-        : (trip.distanceStatus === 'pending' ? '…' : '');
-      html += `
-        <div class="trip-card">
-          <div class="trip-row-top">
-            <span class="trip-route">${escapeHtml(locationLabel(trip.startLocationId))} → ${escapeHtml(locationLabel(trip.endLocationId))}</span>
-            <span class="trip-km">${distText}</span>
-          </div>
-          <div class="trip-meta">${formatDateTime(trip.startDateTime)}${trip.endDateTime ? ' – ' + formatDateTime(trip.endDateTime) : ''} · ${escapeHtml(trip.vehiclePlate)}</div>
-          ${trip.note ? `<div class="trip-note">${escapeHtml(trip.note)}</div>` : ''}
-          ${trip.distanceStatus === 'pending' ? `<div class="hint">${escapeHtml(trip.distanceError || 'Distanz wird nachgeholt, sobald Internet verfügbar ist.')}</div>` : ''}
-          <div class="trip-actions">
-            <button class="btn-text" data-edit="${escapeHtml(trip.id)}">Bearbeiten</button>
-            ${trip.distanceStatus === 'pending' ? `<button class="btn-text" data-retry="${escapeHtml(trip.id)}">Distanz erneut versuchen</button>` : ''}
-            <button class="btn-danger" data-delete="${escapeHtml(trip.id)}">Löschen</button>
-          </div>
-        </div>
-      `;
     }
     return html;
   }
@@ -699,7 +907,29 @@
         </div>`).join('')
       : `<div class="hint">Noch keine Kennzeichen gespeichert.</div>`;
 
+    const rateRows = state.rates.length
+      ? [...state.rates].sort((a, b) => b.validFrom.localeCompare(a.validFrom)).map(r => `
+        <div class="manage-row">
+          <div>ab ${formatDateOnly(r.validFrom)} <span class="sub">${formatEuroPerKm(r.amount)}</span></div>
+          <button class="btn-danger" data-del-rate="${escapeHtml(r.id)}">Löschen</button>
+        </div>`).join('')
+      : `<div class="hint">Noch kein Kilometersatz hinterlegt. Ohne Satz werden keine Kosten berechnet.</div>`;
+
     return `
+      <div class="section-title">Kilometersatz</div>
+      <div class="card">
+        ${rateRows}
+        <div class="field" style="margin-top:16px;">
+          <label>Neuer Satz</label>
+          <div class="two-col">
+            <input type="date" id="new-rate-date" value="${escapeHtml(todayDateStr())}">
+            <input type="text" inputmode="decimal" id="new-rate-amount" placeholder="0,40">
+          </div>
+          <div class="hint">Betrag in Euro pro Kilometer, gültig ab dem gewählten Datum. Bei rückwirkenden Änderungen fragen wir nach, ob bereits erfasste Fahrten angepasst werden sollen.</div>
+        </div>
+        <button class="btn-secondary" id="btn-add-rate">Satz speichern</button>
+      </div>
+
       <div class="section-title">Routing</div>
       <div class="card">
         <div class="field">
@@ -727,6 +957,10 @@
     });
     document.querySelectorAll('[data-del-veh]').forEach(btn => {
       btn.addEventListener('click', () => deleteVehicle(btn.getAttribute('data-del-veh')));
+    });
+    document.getElementById('btn-add-rate').addEventListener('click', addRate);
+    document.querySelectorAll('[data-del-rate]').forEach(btn => {
+      btn.addEventListener('click', () => deleteRate(btn.getAttribute('data-del-rate')));
     });
   }
 
