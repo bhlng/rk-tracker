@@ -56,6 +56,14 @@ body {
   letter-spacing: -0.02em;
 }
 
+.version {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-faint);
+  letter-spacing: 0;
+  vertical-align: middle;
+}
+
 .offline-badge {
   font-size: 12px;
   font-weight: 600;

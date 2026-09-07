@@ -1,6 +1,7 @@
 (() => {
   'use strict';
 
+  const APP_VERSION = '1.1.0';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
 
@@ -767,6 +768,8 @@
       navigator.serviceWorker.register('sw.js').catch(() => { /* offline shell unavailable, app still works online */ });
     });
   }
+
+  document.getElementById('app-version').textContent = 'v' + APP_VERSION;
 
   render();
   retryAllPending();
