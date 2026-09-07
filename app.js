@@ -228,6 +228,31 @@
     render();
   }
 
+  // ---------- Confirm dialog (custom - window.confirm is unreliable in iOS standalone PWAs) ----------
+  function confirmDialog(message, confirmLabel) {
+    return new Promise((resolve) => {
+      closeSheet();
+      const backdrop = document.createElement('div');
+      backdrop.id = 'sheet-backdrop';
+      backdrop.className = 'sheet-backdrop';
+      backdrop.innerHTML = `
+        <div class="sheet" role="dialog">
+          <div class="sheet-handle"></div>
+          <div style="padding: 6px 20px 20px; font-size: 15px; line-height: 1.5;">${escapeHtml(message)}</div>
+          <div style="display:flex; gap:10px; padding: 0 20px 4px;">
+            <button class="btn-secondary" id="confirm-cancel" style="flex:1;">Abbrechen</button>
+            <button class="btn-primary" id="confirm-ok" style="flex:1; background: var(--danger); color: #fff;">${escapeHtml(confirmLabel || 'Löschen')}</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(backdrop);
+      const cleanup = (result) => { backdrop.remove(); resolve(result); };
+      backdrop.querySelector('#confirm-cancel').addEventListener('click', () => cleanup(false));
+      backdrop.querySelector('#confirm-ok').addEventListener('click', () => cleanup(true));
+      backdrop.addEventListener('click', (e) => { if (e.target === backdrop) cleanup(false); });
+    });
+  }
+
   // ---------- Trip CRUD ----------
   function validateDraft() {
     return !!(draft.startLocationId && draft.endLocationId && draft.startDateTime && draft.vehiclePlate);
@@ -321,8 +346,9 @@
     render();
   }
 
-  function deleteTrip(id) {
-    if (!confirm('Diese Reise wirklich löschen?')) return;
+  async function deleteTrip(id) {
+    const ok = await confirmDialog('Diese Reise wirklich löschen?');
+    if (!ok) return;
     state.trips = state.trips.filter(t => t.id !== id);
     saveKey('trips');
     toast('Reise gelöscht');
@@ -348,7 +374,7 @@
           <button class="btn-text" id="sheet-close">Fertig</button>
         </div>
         <div class="sheet-search">
-          <input type="text" id="sheet-search-input" placeholder="${escapeHtml(searchPlaceholder)}" autocomplete="off" autocapitalize="words">
+          <input type="text" id="sheet-search-input" placeholder="${escapeHtml(searchPlaceholder)}" autocomplete="off" autocapitalize="words" enterkeyhint="done">
         </div>
         <div class="sheet-list" id="sheet-list"></div>
       </div>
@@ -391,6 +417,19 @@
     }
 
     searchEl.addEventListener('input', renderList);
+    searchEl.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const q = searchEl.value.trim();
+      if (!q) return;
+      const qLower = q.toLowerCase();
+      const filtered = items.filter(it => matches(it, qLower));
+      if (filtered.length === 1) {
+        onSelect(filtered[0]);
+      } else if (onCreate) {
+        onCreate(q);
+      }
+    });
     backdrop.querySelector('#sheet-close').addEventListener('click', closeSheet);
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeSheet(); });
 
@@ -423,23 +462,24 @@
           <h2>Neue Adresse</h2>
           <button class="btn-text" id="sheet-close">Abbrechen</button>
         </div>
-        <div style="padding: 4px 18px 20px;">
+        <form id="new-loc-form" style="padding: 4px 18px 20px;">
           <div class="field">
             <label for="new-loc-label">Bezeichnung (optional)</label>
-            <input type="text" id="new-loc-label" placeholder="z. B. Büro Zürich">
+            <input type="text" id="new-loc-label" placeholder="z. B. Büro Zürich" enterkeyhint="next">
           </div>
           <div class="field">
             <label for="new-loc-address">Adresse</label>
-            <input type="text" id="new-loc-address" placeholder="Straße, PLZ, Ort" value="${escapeHtml(prefillAddress || '')}">
+            <input type="text" id="new-loc-address" placeholder="Straße, PLZ, Ort" value="${escapeHtml(prefillAddress || '')}" enterkeyhint="done">
           </div>
-          <button class="btn-primary" id="new-loc-save">Adresse speichern & auswählen</button>
-        </div>
+          <button type="submit" class="btn-primary" id="new-loc-save">Adresse speichern & auswählen</button>
+        </form>
       </div>
     `;
     document.body.appendChild(backdrop);
     backdrop.querySelector('#sheet-close').addEventListener('click', closeSheet);
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeSheet(); });
-    backdrop.querySelector('#new-loc-save').addEventListener('click', () => {
+    backdrop.querySelector('#new-loc-form').addEventListener('submit', (e) => {
+      e.preventDefault();
       const address = backdrop.querySelector('#new-loc-address').value.trim();
       if (!address) { toast('Bitte eine Adresse eingeben'); return; }
       const label = backdrop.querySelector('#new-loc-label').value.trim() || address;
@@ -485,17 +525,21 @@
     retryAllPending();
   }
 
-  function deleteLocation(id) {
-    if (!confirm('Diese Adresse löschen?')) return;
+  async function deleteLocation(id) {
+    const ok = await confirmDialog('Diese Adresse löschen?');
+    if (!ok) return;
     state.locations = state.locations.filter(l => l.id !== id);
     saveKey('locations');
+    toast('Adresse gelöscht');
     render();
   }
 
-  function deleteVehicle(plate) {
-    if (!confirm('Dieses Kennzeichen löschen?')) return;
+  async function deleteVehicle(plate) {
+    const ok = await confirmDialog('Dieses Kennzeichen löschen?');
+    if (!ok) return;
     state.vehicles = state.vehicles.filter(v => v.plate !== plate);
     saveKey('vehicles');
+    toast('Kennzeichen gelöscht');
     render();
   }
 
@@ -705,9 +749,10 @@
   }
 
   document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       if (editingTripId && btn.getAttribute('data-view') !== 'new') {
-        if (!confirm('Bearbeitung abbrechen? Ungespeicherte Änderungen gehen verloren.')) return;
+        const ok = await confirmDialog('Bearbeitung abbrechen? Ungespeicherte Änderungen gehen verloren.', 'Verwerfen');
+        if (!ok) return;
         editingTripId = null;
         draft = makeEmptyDraft();
       }
