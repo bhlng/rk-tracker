@@ -1,6 +1,5 @@
-const CACHE_NAME = 'reisekosten-tracker-v1.2.0';
+const CACHE_NAME = 'reisekosten-tracker-v1.2.1';
 const APP_SHELL = [
-  './',
   './index.html',
   './styles.css',
   './app.js',
@@ -11,7 +10,11 @@ const APP_SHELL = [
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL))
+    caches.open(CACHE_NAME).then((cache) =>
+      Promise.all(APP_SHELL.map((url) =>
+        fetch(url, { cache: 'reload' }).then((response) => cache.put(url, response))
+      ))
+    )
   );
   self.skipWaiting();
 });
@@ -30,11 +33,15 @@ self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET' || url.origin !== self.location.origin) {
     return; // e.g. OpenRouteService calls: always go to the network untouched
   }
+  // Page navigations always resolve to the cached app shell, regardless of
+  // which exact URL variant ("/" vs "/index.html") the browser requested.
+  const cacheKey = event.request.mode === 'navigate' ? './index.html' : event.request;
+
   event.respondWith(
-    caches.match(event.request).then((cached) => {
+    caches.match(cacheKey).then((cached) => {
       const network = fetch(event.request).then((response) => {
         const copy = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        caches.open(CACHE_NAME).then((cache) => cache.put(cacheKey, copy));
         return response;
       }).catch(() => cached);
       return cached || network;
