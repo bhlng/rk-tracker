@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.5.4';
+  const APP_VERSION = '1.6.0';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -330,7 +330,7 @@
     const feat = data.features && data.features[0];
     if (!feat) throw new Error('geocode-empty');
     const [lon, lat] = feat.geometry.coordinates;
-    return { lat, lon };
+    return { lat, lon, label: feat.properties.label };
   }
 
   async function fetchRouteKm(startCoord, endCoord) {
@@ -416,6 +416,7 @@
     const coords = await geocodeAddress(loc.address);
     loc.lat = coords.lat;
     loc.lon = coords.lon;
+    loc.resolvedLabel = coords.label;
     saveKey('locations');
     return loc;
   }
@@ -735,6 +736,7 @@
     closeSheet();
     let stage = 'place'; // 'place' | 'street'
     let stagePlace = null; // {label, lat, lon, gid}
+    let streetIsManual = true; // false once a real street suggestion (or GPS) is used, untouched since
 
     const backdrop = document.createElement('div');
     backdrop.id = 'sheet-backdrop';
@@ -805,9 +807,9 @@
       searchInput.focus();
     });
 
-    function finalizeNewLocation(address, labelOverride) {
+    function finalizeNewLocation(address, labelOverride, verified) {
       const label = (labelOverride || '').trim() || address;
-      const loc = { id: uid(), label, address, lat: null, lon: null, usageCount: 0, lastUsedAt: null };
+      const loc = { id: uid(), label, address, lat: null, lon: null, usageCount: 0, lastUsedAt: null, verified: !!verified };
       state.locations.push(loc);
       saveKey('locations');
       closeSheet();
@@ -824,7 +826,7 @@
       const street = searchInput.value.trim();
       if (!street) { toast('Bitte eine Straße eingeben'); return; }
       const address = buildAddressFromParts(street, houseInput.value.trim(), stagePlace ? stagePlace.label : '');
-      finalizeNewLocation(address, labelInput.value);
+      finalizeNewLocation(address, labelInput.value, !streetIsManual);
     });
 
     function renderPlaceResults(query, saved, places, errorHint) {
@@ -847,7 +849,7 @@
         btn.addEventListener('click', () => goToStreetStage(places[Number(btn.getAttribute('data-place'))]));
       });
       const manualBtn = resultsEl.querySelector('#addr-manual-use');
-      if (manualBtn) manualBtn.addEventListener('click', () => finalizeNewLocation(query, ''));
+      if (manualBtn) manualBtn.addEventListener('click', () => finalizeNewLocation(query, '', false));
     }
 
     function renderStreetResults(query, streets, errorHint) {
@@ -859,11 +861,13 @@
         btn.addEventListener('click', () => {
           const r = streets[Number(btn.getAttribute('data-street'))];
           searchInput.value = r.street || r.label.split(',')[0].trim();
+          streetIsManual = false;
           confirmRow.hidden = false;
           houseInput.focus();
         });
       });
       resultsEl.querySelector('#addr-street-manual').addEventListener('click', () => {
+        streetIsManual = true;
         confirmRow.hidden = false;
         houseInput.focus();
       });
@@ -873,6 +877,7 @@
     let requestToken = 0;
     searchInput.addEventListener('input', () => {
       confirmRow.hidden = true;
+      if (stage === 'street') streetIsManual = true; // editing invalidates a prior pick
       clearTimeout(debounceTimer);
       const query = searchInput.value.trim();
       if (query.length < 2) {
@@ -935,6 +940,7 @@
     if (gpsPrefill) {
       goToStreetStage(gpsPrefill.place);
       searchInput.value = gpsPrefill.street;
+      streetIsManual = !gpsPrefill.street;
       houseInput.value = gpsPrefill.housenumber;
       confirmRow.hidden = false;
     } else {
@@ -1290,6 +1296,7 @@
             ${trip.note ? `<div class="trip-note">${escapeHtml(trip.note)}</div>` : ''}
             ${trip.distanceStatus === 'pending' ? `<div class="hint">${escapeHtml(trip.distanceError || 'Distanz wird nachgeholt, sobald Internet verfügbar ist.')}</div>` : ''}
             ${trip.distanceStatus === 'ok' && trip.cost == null ? `<div class="hint">Kein Kilometersatz für dieses Datum hinterlegt.</div>` : ''}
+            ${[findLocation(trip.startLocationId), findLocation(trip.endLocationId)].some(l => l && l.verified === false) ? `<div class="hint warn-text">Manuell erfasste Adresse — bitte Genauigkeit prüfen</div>` : ''}
             <div class="trip-actions">
               <button class="btn-text" data-edit="${escapeHtml(trip.id)}">Bearbeiten</button>
               ${trip.distanceStatus === 'pending' ? `<button class="btn-text" data-retry="${escapeHtml(trip.id)}">Distanz erneut versuchen</button>` : ''}
@@ -1318,7 +1325,11 @@
     const locRows = state.locations.length
       ? sortedByRecency(state.locations).map(l => `
         <div class="manage-row">
-          <div><div>${escapeHtml(l.label)}</div><div class="sub">${escapeHtml(l.address)}</div></div>
+          <div>
+            <div>${escapeHtml(l.label)}</div>
+            <div class="sub">${escapeHtml(l.address)}</div>
+            ${l.verified === false ? `<div class="sub warn-text">manuell erfasst${l.resolvedLabel ? ' · aufgelöst als: ' + escapeHtml(l.resolvedLabel) : ''}</div>` : ''}
+          </div>
           <button class="btn-danger" data-del-loc="${escapeHtml(l.id)}">Löschen</button>
         </div>`).join('')
       : `<div class="hint">Noch keine Adressen gespeichert.</div>`;
