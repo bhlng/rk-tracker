@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.2.3';
+  const APP_VERSION = '1.3.0';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
 
@@ -94,6 +94,17 @@
     if (!dayStr) return '';
     const [y, m, d] = dayStr.split('-');
     return `${d}.${m}.${y}`;
+  }
+
+  function splitDateTime(v) {
+    if (!v) return { date: '', time: '' };
+    const [date, time] = v.split('T');
+    return { date: date || '', time: time || '' };
+  }
+
+  function combineDateTime(date, time) {
+    if (!date) return '';
+    return `${date}T${time || '00:00'}`;
   }
 
   function todayDateStr() {
@@ -770,14 +781,18 @@
           <label>Entfernung</label>
           ${distanceBoxHtml(draft, 'retry-draft')}
         </div>
-        <div class="two-col">
-          <div class="field">
-            <label>Start</label>
-            <input type="datetime-local" id="input-start-dt" value="${escapeHtml(draft.startDateTime)}">
+        <div class="field">
+          <label>Start</label>
+          <div class="two-col">
+            <input type="date" id="input-start-date" value="${escapeHtml(splitDateTime(draft.startDateTime).date)}">
+            <input type="time" id="input-start-time" value="${escapeHtml(splitDateTime(draft.startDateTime).time)}">
           </div>
-          <div class="field">
-            <label>Rückkehr</label>
-            <input type="datetime-local" id="input-end-dt" value="${escapeHtml(draft.endDateTime)}">
+        </div>
+        <div class="field">
+          <label>Rückkehr (optional)</label>
+          <div class="two-col">
+            <input type="date" id="input-end-date" value="${escapeHtml(splitDateTime(draft.endDateTime).date)}">
+            <input type="time" id="input-end-time" value="${escapeHtml(splitDateTime(draft.endDateTime).time)}">
           </div>
         </div>
         <div class="field">
@@ -810,12 +825,21 @@
     const cancelBtn = document.getElementById('btn-cancel-edit');
     if (cancelBtn) cancelBtn.addEventListener('click', cancelEdit);
 
-    document.getElementById('input-start-dt').addEventListener('change', (e) => {
-      draft.startDateTime = e.target.value;
+    const startDateEl = document.getElementById('input-start-date');
+    const startTimeEl = document.getElementById('input-start-time');
+    const updateStart = () => {
+      draft.startDateTime = combineDateTime(startDateEl.value, startTimeEl.value);
       computeCost(draft);
       render();
-    });
-    document.getElementById('input-end-dt').addEventListener('change', (e) => { draft.endDateTime = e.target.value; });
+    };
+    startDateEl.addEventListener('change', updateStart);
+    startTimeEl.addEventListener('change', updateStart);
+
+    const endDateEl = document.getElementById('input-end-date');
+    const endTimeEl = document.getElementById('input-end-time');
+    const updateEnd = () => { draft.endDateTime = combineDateTime(endDateEl.value, endTimeEl.value); };
+    endDateEl.addEventListener('change', updateEnd);
+    endTimeEl.addEventListener('change', updateEnd);
     document.getElementById('btn-edit-rate').addEventListener('click', openRateEditor);
     const noteEl = document.getElementById('input-note');
     noteEl.addEventListener('input', (e) => {
