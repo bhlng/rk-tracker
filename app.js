@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.4.0';
+  const APP_VERSION = '1.4.1';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
 
@@ -126,7 +126,7 @@
     );
   }
 
-  function attachAutocomplete(inputEl, listEl, { layers, getFocus, getBoundary, onSelect }) {
+  function attachAutocomplete(inputEl, listEl, { layers, getFocus, getBoundary, getBoundaryGid, dedupeKey, renderLabel, onSelect }) {
     let debounceTimer = null;
     let requestToken = 0;
     inputEl.addEventListener('input', () => {
@@ -139,10 +139,13 @@
         try {
           const focus = getFocus ? getFocus() : null;
           const boundary = getBoundary ? getBoundary() : null;
+          const boundaryGid = getBoundaryGid ? getBoundaryGid() : null;
           results = await geocodeAutocomplete(query, {
             layers,
             focusLat: focus ? focus.lat : null, focusLon: focus ? focus.lon : null,
-            boundaryLat: boundary ? boundary.lat : null, boundaryLon: boundary ? boundary.lon : null,
+            boundaryGid,
+            boundaryLat: boundaryGid ? null : (boundary ? boundary.lat : null),
+            boundaryLon: boundaryGid ? null : (boundary ? boundary.lon : null),
             boundaryRadiusKm: boundary ? boundary.radiusKm : null
           });
         } catch (e) {
@@ -150,12 +153,21 @@
           return;
         }
         if (myToken !== requestToken) return; // a newer keystroke already superseded this
+        if (dedupeKey) {
+          const seen = new Set();
+          results = results.filter(r => {
+            const k = dedupeKey(r);
+            if (seen.has(k)) return false;
+            seen.add(k);
+            return true;
+          });
+        }
         if (!results.length) {
           listEl.innerHTML = state.settings.orsApiKey ? `<div class="hint" style="padding:8px 4px;">Keine Treffer</div>` : `<div class="hint" style="padding:8px 4px;">Kein API-Key hinterlegt — Adresse manuell eingeben</div>`;
           listEl.hidden = false;
           return;
         }
-        listEl.innerHTML = results.map((r, i) => `<button type="button" class="sheet-item" data-idx="${i}">${escapeHtml(r.label)}</button>`).join('');
+        listEl.innerHTML = results.map((r, i) => `<button type="button" class="sheet-item" data-idx="${i}">${escapeHtml(renderLabel ? renderLabel(r) : r.label)}</button>`).join('');
         listEl.hidden = false;
         listEl.querySelectorAll('[data-idx]').forEach(btn => {
           btn.addEventListener('click', () => {
@@ -336,7 +348,9 @@
       params.set('focus.point.lat', opts.focusLat);
       params.set('focus.point.lon', opts.focusLon);
     }
-    if (opts.boundaryLat != null) {
+    if (opts.boundaryGid) {
+      params.set('boundary.gid', opts.boundaryGid);
+    } else if (opts.boundaryLat != null) {
       params.set('boundary.circle.lat', opts.boundaryLat);
       params.set('boundary.circle.lon', opts.boundaryLon);
       params.set('boundary.circle.radius', String(opts.boundaryRadiusKm || 20));
@@ -349,6 +363,7 @@
       lat: f.geometry.coordinates[1],
       lon: f.geometry.coordinates[0],
       layer: f.properties.layer,
+      gid: f.properties.gid,
       street: f.properties.street || '',
       housenumber: f.properties.housenumber || ''
     }));
@@ -368,6 +383,7 @@
       label: p.label,
       street: p.street || '',
       housenumber: p.housenumber || '',
+      postalcode: p.postalcode || '',
       locality: p.locality || p.county || p.region || '',
       lat: feat.geometry.coordinates[1],
       lon: feat.geometry.coordinates[0]
@@ -707,12 +723,15 @@
           <h2>Neue Adresse</h2>
           <button class="btn-text" id="sheet-close">Abbrechen</button>
         </div>
-        <form id="new-loc-form" style="padding: 4px 18px 20px;">
+        <div style="padding: 0 18px 4px;">
+          <button type="button" class="btn-primary" id="btn-use-location" style="width:100%;">Aktuellen Standort verwenden</button>
+          <div class="hint" id="gps-result-hint" hidden></div>
+        </div>
+        <form id="new-loc-form" style="padding: 16px 18px 20px;">
           <div class="field">
             <label for="new-loc-label">Bezeichnung (optional)</label>
             <input type="text" id="new-loc-label" placeholder="z. B. Büro Zürich" enterkeyhint="next">
           </div>
-          <button type="button" class="btn-secondary" id="btn-use-location" style="width:100%; margin-bottom:18px;">Aktuellen Standort verwenden</button>
           <div class="field">
             <label for="new-loc-place">Ort</label>
             <input type="text" id="new-loc-place" placeholder="z. B. Zürich" autocomplete="off" autocapitalize="words" enterkeyhint="next">
@@ -754,7 +773,7 @@
     placeInput.addEventListener('focus', requestAmbientFocus, { once: true });
 
     attachAutocomplete(placeInput, placeList, {
-      layers: 'locality,localadmin,borough,neighbourhood,county,region',
+      layers: 'locality,localadmin',
       getFocus: () => ambientFocus,
       onSelect: (r) => {
         placeInput.value = r.label;
@@ -768,10 +787,12 @@
     attachAutocomplete(streetInput, streetList, {
       layers: 'street,address',
       getFocus: () => selectedPlace ? { lat: selectedPlace.lat, lon: selectedPlace.lon } : null,
-      getBoundary: () => selectedPlace ? { lat: selectedPlace.lat, lon: selectedPlace.lon, radiusKm: 20 } : null,
+      getBoundaryGid: () => selectedPlace ? selectedPlace.gid : null,
+      getBoundary: () => (selectedPlace && !selectedPlace.gid) ? { lat: selectedPlace.lat, lon: selectedPlace.lon, radiusKm: 15 } : null,
+      dedupeKey: (r) => (r.street || r.label.split(',')[0].trim()).toLowerCase(),
+      renderLabel: (r) => r.street || r.label.split(',')[0].trim(),
       onSelect: (r) => {
         streetInput.value = r.street || r.label.split(',')[0].trim();
-        if (r.housenumber) houseInput.value = r.housenumber;
       }
     });
 
@@ -785,13 +806,15 @@
         async (pos) => {
           try {
             const r = await geocodeReverse(pos.coords.latitude, pos.coords.longitude);
-            const ortLabel = r.locality || r.label;
+            const ortLabel = [r.postalcode, r.locality || r.label].filter(Boolean).join(' ');
             placeInput.value = ortLabel;
-            selectedPlace = { label: ortLabel, lat: r.lat, lon: r.lon };
+            selectedPlace = { label: ortLabel, lat: r.lat, lon: r.lon, gid: null };
             setStreetEnabled(true);
             streetInput.value = r.street || '';
             houseInput.value = r.housenumber || '';
-            toast('Standort übernommen — bitte prüfen, v. a. die Hausnummer');
+            const hintEl = backdrop.querySelector('#gps-result-hint');
+            hintEl.hidden = false;
+            hintEl.textContent = `Vorschlag: ${buildAddressFromParts(r.street, r.housenumber, ortLabel)} — bitte prüfen, v. a. die Hausnummer`;
           } catch (err) {
             toast(err && err.message === 'no-key' ? 'Kein API-Key hinterlegt' : 'Standort konnte nicht aufgelöst werden');
           } finally {
