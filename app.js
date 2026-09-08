@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.6.0';
+  const APP_VERSION = '1.6.1';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -215,6 +215,16 @@
 
   // ---------- Locations / vehicles lookup ----------
   function findLocation(id) { return state.locations.find(l => l.id === id); }
+  // Locations saved before the verified flag existed have verified===undefined.
+  // Heuristic for those legacy entries: a real autocomplete/GPS pick always
+  // produces a comma-separated "street, place" or Pelias "place, country"
+  // label; a bare word (like a hand-typed "Rotenburg") never does.
+  function isUnverifiedLocation(loc) {
+    if (loc.verified === true) return false;
+    if (loc.verified === false) return true;
+    return !loc.address.includes(',');
+  }
+
   function locationLabelHtml(id) {
     const loc = findLocation(id);
     return loc ? escapeHtml(loc.label) : '<span class="warn-text">gelöschter Ort</span>';
@@ -1296,7 +1306,7 @@
             ${trip.note ? `<div class="trip-note">${escapeHtml(trip.note)}</div>` : ''}
             ${trip.distanceStatus === 'pending' ? `<div class="hint">${escapeHtml(trip.distanceError || 'Distanz wird nachgeholt, sobald Internet verfügbar ist.')}</div>` : ''}
             ${trip.distanceStatus === 'ok' && trip.cost == null ? `<div class="hint">Kein Kilometersatz für dieses Datum hinterlegt.</div>` : ''}
-            ${[findLocation(trip.startLocationId), findLocation(trip.endLocationId)].some(l => l && l.verified === false) ? `<div class="hint warn-text">Manuell erfasste Adresse — bitte Genauigkeit prüfen</div>` : ''}
+            ${[findLocation(trip.startLocationId), findLocation(trip.endLocationId)].some(l => l && isUnverifiedLocation(l)) ? `<div class="hint warn-text">Manuell erfasste Adresse — bitte Genauigkeit prüfen</div>` : ''}
             <div class="trip-actions">
               <button class="btn-text" data-edit="${escapeHtml(trip.id)}">Bearbeiten</button>
               ${trip.distanceStatus === 'pending' ? `<button class="btn-text" data-retry="${escapeHtml(trip.id)}">Distanz erneut versuchen</button>` : ''}
@@ -1328,7 +1338,7 @@
           <div>
             <div>${escapeHtml(l.label)}</div>
             <div class="sub">${escapeHtml(l.address)}</div>
-            ${l.verified === false ? `<div class="sub warn-text">manuell erfasst${l.resolvedLabel ? ' · aufgelöst als: ' + escapeHtml(l.resolvedLabel) : ''}</div>` : ''}
+            ${isUnverifiedLocation(l) ? `<div class="sub warn-text">manuell erfasst${l.resolvedLabel ? ' · aufgelöst als: ' + escapeHtml(l.resolvedLabel) : ''}</div>` : ''}
           </div>
           <button class="btn-danger" data-del-loc="${escapeHtml(l.id)}">Löschen</button>
         </div>`).join('')
