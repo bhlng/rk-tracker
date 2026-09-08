@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.6.1';
+  const APP_VERSION = '1.7.0';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -1103,6 +1103,56 @@
     setTimeout(() => backdrop.querySelector('#rate-amount-input').focus(), 50);
   }
 
+  // ---------- Backup ----------
+  function exportBackup() {
+    const backup = {
+      exportedAt: nowIso(),
+      appVersion: APP_VERSION,
+      trips: state.trips,
+      locations: state.locations,
+      vehicles: state.vehicles,
+      rates: state.rates,
+      routeCache: state.routeCache,
+      settings: state.settings
+    };
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `reisekosten-backup-${todayDateStr()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast('Backup wird heruntergeladen');
+  }
+
+  async function importBackupFile(file) {
+    const ok = await confirmDialog('Dies ersetzt ALLE aktuellen Daten (Reisen, Adressen, Fahrzeuge, Sätze, API-Key) durch den Inhalt der Backup-Datei. Fortfahren?', 'Ersetzen');
+    if (!ok) return;
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      if (!data || typeof data !== 'object') throw new Error('invalid');
+      state.trips = Array.isArray(data.trips) ? data.trips : [];
+      state.locations = Array.isArray(data.locations) ? data.locations : [];
+      state.vehicles = Array.isArray(data.vehicles) ? data.vehicles : [];
+      state.rates = Array.isArray(data.rates) ? data.rates : [];
+      state.routeCache = (data.routeCache && typeof data.routeCache === 'object') ? data.routeCache : {};
+      state.settings = (data.settings && typeof data.settings === 'object') ? data.settings : { orsApiKey: '' };
+      saveKey('trips');
+      saveKey('locations');
+      saveKey('vehicles');
+      saveKey('rates');
+      saveKey('routeCache');
+      saveKey('settings');
+      toast('Backup importiert');
+      render();
+    } catch (e) {
+      toast('Backup-Datei konnte nicht gelesen werden');
+    }
+  }
+
   // ---------- Settings ----------
   function saveApiKey() {
     const input = document.getElementById('ors-key-input');
@@ -1361,6 +1411,14 @@
       : `<div class="hint">Noch kein Kilometersatz hinterlegt. Ohne Satz werden keine Kosten berechnet.</div>`;
 
     return `
+      <div class="section-title">Backup</div>
+      <div class="card">
+        <div class="hint" style="margin-top:0; margin-bottom:14px;">Alle Daten liegen ausschließlich lokal auf diesem Gerät. Wird die App vom Home-Bildschirm gelöscht, können Reisen, Adressen und Einstellungen unwiederbringlich verloren gehen. Erstelle daher regelmäßig ein Backup und sichere die Datei z. B. in iCloud Drive oder per Mail.</div>
+        <button class="btn-secondary" id="btn-export-backup" style="width:100%; margin-bottom:10px;">Backup exportieren</button>
+        <button class="btn-secondary" id="btn-import-backup" style="width:100%;">Backup importieren</button>
+        <input type="file" id="import-backup-input" accept="application/json,.json" hidden>
+      </div>
+
       <div class="section-title">Kilometersatz</div>
       <div class="card">
         ${rateRows}
@@ -1396,6 +1454,14 @@
   }
 
   function attachSettingsViewHandlers() {
+    document.getElementById('btn-export-backup').addEventListener('click', exportBackup);
+    const importInput = document.getElementById('import-backup-input');
+    document.getElementById('btn-import-backup').addEventListener('click', () => importInput.click());
+    importInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (file) importBackupFile(file);
+      e.target.value = '';
+    });
     document.getElementById('btn-save-key').addEventListener('click', saveApiKey);
     document.querySelectorAll('[data-del-loc]').forEach(btn => {
       btn.addEventListener('click', () => deleteLocation(btn.getAttribute('data-del-loc')));
