@@ -1,7 +1,8 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.4.1';
+  const APP_VERSION = '1.5.0';
+  const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
 
@@ -355,6 +356,7 @@
       params.set('boundary.circle.lon', opts.boundaryLon);
       params.set('boundary.circle.radius', String(opts.boundaryRadiusKm || 20));
     }
+    if (opts.boundaryCountry) params.set('boundary.country', opts.boundaryCountry);
     const res = await fetch(`${ORS_BASE}/geocode/autocomplete?${params.toString()}`);
     if (!res.ok) throw new Error('autocomplete-failed');
     const data = await res.json();
@@ -496,7 +498,7 @@
           </div>
         </div>
       `;
-      document.body.appendChild(backdrop);
+      appendSheet(backdrop);
       const cleanup = (result) => { backdrop.remove(); resolve(result); };
       backdrop.querySelector('#confirm-cancel').addEventListener('click', () => cleanup(false));
       backdrop.querySelector('#confirm-ok').addEventListener('click', () => cleanup(true));
@@ -620,6 +622,15 @@
   function closeSheet() {
     const el = document.getElementById('sheet-backdrop');
     if (el) el.remove();
+    document.body.style.overflow = '';
+  }
+
+  // Locks background scroll while a sheet is open. On iOS, having both the
+  // page and the sheet independently scrollable is what causes the on-screen
+  // keyboard's focus/cursor positioning to desync from the visible input.
+  function appendSheet(backdrop) {
+    document.body.appendChild(backdrop);
+    document.body.style.overflow = 'hidden';
   }
 
   function openPicker({ title, searchPlaceholder, items, matches, renderItem, onSelect, onCreate }) {
@@ -640,7 +651,7 @@
         <div class="sheet-list" id="sheet-list"></div>
       </div>
     `;
-    document.body.appendChild(backdrop);
+    appendSheet(backdrop);
 
     const listEl = backdrop.querySelector('#sheet-list');
     const searchEl = backdrop.querySelector('#sheet-search-input');
@@ -698,21 +709,14 @@
     setTimeout(() => searchEl.focus(), 50);
   }
 
-  function openLocationPicker(role) {
-    const items = sortedByRecency(state.locations).map(l => ({ ...l, __id: l.id }));
-    openPicker({
-      title: role === 'start' ? 'Startort wählen' : 'Ziel wählen',
-      searchPlaceholder: 'Adresse suchen oder neu eingeben',
-      items,
-      matches: (it, q) => (it.label + ' ' + it.address).toLowerCase().includes(q),
-      renderItem: (it) => ({ primary: it.label, secondary: it.label !== it.address ? it.address : '' }),
-      onSelect: (it) => { closeSheet(); setDraftLocation(role, it.id); },
-      onCreate: (query) => openLocationCreateForm(role, query)
-    });
-  }
-
-  function openLocationCreateForm(role, prefillQuery) {
+  // Single-sheet address search: type a place, pick it, keep typing (in the
+  // same sheet) to find a street within it, optionally add a house number.
+  // Already-saved locations are offered inline alongside live place matches.
+  function openAddressSearch(role, gpsPrefill) {
     closeSheet();
+    let stage = 'place'; // 'place' | 'street'
+    let stagePlace = null; // {label, lat, lon, gid}
+
     const backdrop = document.createElement('div');
     backdrop.id = 'sheet-backdrop';
     backdrop.className = 'sheet-backdrop';
@@ -720,130 +724,205 @@
       <div class="sheet" role="dialog">
         <div class="sheet-handle"></div>
         <div class="sheet-header">
-          <h2>Neue Adresse</h2>
+          <h2>${role === 'start' ? 'Startort wählen' : 'Ziel wählen'}</h2>
           <button class="btn-text" id="sheet-close">Abbrechen</button>
         </div>
-        <div style="padding: 0 18px 4px;">
-          <button type="button" class="btn-primary" id="btn-use-location" style="width:100%;">Aktuellen Standort verwenden</button>
-          <div class="hint" id="gps-result-hint" hidden></div>
+        <div id="addr-chip-row" class="sheet-search" hidden>
+          <span class="chip"><span id="addr-chip-label"></span><button type="button" id="addr-chip-clear" aria-label="Ort ändern">×</button></span>
         </div>
-        <form id="new-loc-form" style="padding: 16px 18px 20px;">
+        <div class="sheet-search">
+          <input type="text" id="addr-search-input" placeholder="Ort eingeben" autocomplete="off" autocapitalize="words" enterkeyhint="search">
+        </div>
+        <div class="sheet-list" id="addr-results"></div>
+        <div id="addr-confirm-row" style="padding: 4px 18px 4px;" hidden>
           <div class="field">
-            <label for="new-loc-label">Bezeichnung (optional)</label>
-            <input type="text" id="new-loc-label" placeholder="z. B. Büro Zürich" enterkeyhint="next">
+            <input type="text" id="addr-housenumber-input" placeholder="Hausnummer (optional)" inputmode="numeric" enterkeyhint="done">
           </div>
-          <div class="field">
-            <label for="new-loc-place">Ort</label>
-            <input type="text" id="new-loc-place" placeholder="z. B. Zürich" autocomplete="off" autocapitalize="words" enterkeyhint="next">
-            <div class="autocomplete-list" id="new-loc-place-list" hidden></div>
+          <button type="button" class="btn-text" id="addr-label-toggle">+ Bezeichnung hinzufügen</button>
+          <div class="field" id="addr-label-field" hidden>
+            <input type="text" id="addr-label-input" placeholder="z. B. Büro Zürich" enterkeyhint="done">
           </div>
-          <div class="field">
-            <label for="new-loc-street">Straße</label>
-            <input type="text" id="new-loc-street" placeholder="Erst Ort wählen" autocomplete="off" autocapitalize="words" enterkeyhint="next" disabled>
-            <div class="autocomplete-list" id="new-loc-street-list" hidden></div>
-          </div>
-          <div class="field">
-            <label for="new-loc-housenumber">Hausnummer (optional)</label>
-            <input type="text" id="new-loc-housenumber" placeholder="1" inputmode="numeric" enterkeyhint="done">
-          </div>
-          <button type="submit" class="btn-primary" id="new-loc-save">Adresse speichern & auswählen</button>
-        </form>
+          <button type="button" class="btn-primary" id="addr-confirm-btn" style="width:100%; margin-top:10px;">Übernehmen</button>
+        </div>
       </div>
     `;
-    document.body.appendChild(backdrop);
+    appendSheet(backdrop);
     backdrop.querySelector('#sheet-close').addEventListener('click', closeSheet);
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeSheet(); });
 
-    let selectedPlace = null; // {label, lat, lon} once a suggestion was picked
-    const placeInput = backdrop.querySelector('#new-loc-place');
-    const placeList = backdrop.querySelector('#new-loc-place-list');
-    const streetInput = backdrop.querySelector('#new-loc-street');
-    const streetList = backdrop.querySelector('#new-loc-street-list');
-    const houseInput = backdrop.querySelector('#new-loc-housenumber');
+    const searchInput = backdrop.querySelector('#addr-search-input');
+    const resultsEl = backdrop.querySelector('#addr-results');
+    const chipRow = backdrop.querySelector('#addr-chip-row');
+    const chipLabel = backdrop.querySelector('#addr-chip-label');
+    const confirmRow = backdrop.querySelector('#addr-confirm-row');
+    const houseInput = backdrop.querySelector('#addr-housenumber-input');
+    const labelToggle = backdrop.querySelector('#addr-label-toggle');
+    const labelField = backdrop.querySelector('#addr-label-field');
+    const labelInput = backdrop.querySelector('#addr-label-input');
+    const confirmBtn = backdrop.querySelector('#addr-confirm-btn');
 
-    function setStreetEnabled(enabled) {
-      streetInput.disabled = !enabled;
-      streetInput.placeholder = enabled ? 'z. B. Bahnhofstrasse' : 'Erst Ort wählen';
+    searchInput.addEventListener('focus', requestAmbientFocus, { once: true });
+
+    function goToStreetStage(place) {
+      stage = 'street';
+      stagePlace = place;
+      chipLabel.textContent = place.label;
+      chipRow.hidden = false;
+      searchInput.value = '';
+      searchInput.placeholder = 'Straße eingeben';
+      resultsEl.innerHTML = '';
+      confirmRow.hidden = true;
+      searchInput.focus();
     }
 
-    placeInput.addEventListener('input', () => {
-      selectedPlace = null;
-      setStreetEnabled(false);
-    });
-    placeInput.addEventListener('focus', requestAmbientFocus, { once: true });
-
-    attachAutocomplete(placeInput, placeList, {
-      layers: 'locality,localadmin',
-      getFocus: () => ambientFocus,
-      onSelect: (r) => {
-        placeInput.value = r.label;
-        selectedPlace = r;
-        setStreetEnabled(true);
-        streetInput.value = '';
-        streetInput.focus();
-      }
+    backdrop.querySelector('#addr-chip-clear').addEventListener('click', () => {
+      stage = 'place';
+      stagePlace = null;
+      chipRow.hidden = true;
+      searchInput.value = '';
+      searchInput.placeholder = 'Ort eingeben';
+      resultsEl.innerHTML = '';
+      confirmRow.hidden = true;
+      searchInput.focus();
     });
 
-    attachAutocomplete(streetInput, streetList, {
-      layers: 'street,address',
-      getFocus: () => selectedPlace ? { lat: selectedPlace.lat, lon: selectedPlace.lon } : null,
-      getBoundaryGid: () => selectedPlace ? selectedPlace.gid : null,
-      getBoundary: () => (selectedPlace && !selectedPlace.gid) ? { lat: selectedPlace.lat, lon: selectedPlace.lon, radiusKm: 15 } : null,
-      dedupeKey: (r) => (r.street || r.label.split(',')[0].trim()).toLowerCase(),
-      renderLabel: (r) => r.street || r.label.split(',')[0].trim(),
-      onSelect: (r) => {
-        streetInput.value = r.street || r.label.split(',')[0].trim();
-      }
-    });
-
-    backdrop.querySelector('#btn-use-location').addEventListener('click', (e) => {
-      const btn = e.currentTarget;
-      if (!navigator.geolocation) { toast('Standortbestimmung wird von diesem Gerät nicht unterstützt'); return; }
-      btn.disabled = true;
-      btn.textContent = 'Standort wird ermittelt…';
-      const reset = () => { btn.disabled = false; btn.textContent = 'Aktuellen Standort verwenden'; };
-      navigator.geolocation.getCurrentPosition(
-        async (pos) => {
-          try {
-            const r = await geocodeReverse(pos.coords.latitude, pos.coords.longitude);
-            const ortLabel = [r.postalcode, r.locality || r.label].filter(Boolean).join(' ');
-            placeInput.value = ortLabel;
-            selectedPlace = { label: ortLabel, lat: r.lat, lon: r.lon, gid: null };
-            setStreetEnabled(true);
-            streetInput.value = r.street || '';
-            houseInput.value = r.housenumber || '';
-            const hintEl = backdrop.querySelector('#gps-result-hint');
-            hintEl.hidden = false;
-            hintEl.textContent = `Vorschlag: ${buildAddressFromParts(r.street, r.housenumber, ortLabel)} — bitte prüfen, v. a. die Hausnummer`;
-          } catch (err) {
-            toast(err && err.message === 'no-key' ? 'Kein API-Key hinterlegt' : 'Standort konnte nicht aufgelöst werden');
-          } finally {
-            reset();
-          }
-        },
-        () => { toast('Standortzugriff nicht möglich oder abgelehnt'); reset(); },
-        { enableHighAccuracy: true, timeout: 10000 }
-      );
-    });
-
-    backdrop.querySelector('#new-loc-form').addEventListener('submit', (e) => {
-      e.preventDefault();
-      const ortLabel = selectedPlace ? selectedPlace.label : placeInput.value.trim();
-      const address = buildAddressFromParts(streetInput.value.trim(), houseInput.value.trim(), ortLabel);
-      if (!address) { toast('Bitte mindestens einen Ort angeben'); return; }
-      const label = backdrop.querySelector('#new-loc-label').value.trim() || address;
+    function finalizeNewLocation(address, labelOverride) {
+      const label = (labelOverride || '').trim() || address;
       const loc = { id: uid(), label, address, lat: null, lon: null, usageCount: 0, lastUsedAt: null };
       state.locations.push(loc);
       saveKey('locations');
       closeSheet();
       setDraftLocation(role, loc.id);
+    }
+
+    labelToggle.addEventListener('click', () => {
+      labelField.hidden = false;
+      labelToggle.hidden = true;
+      labelInput.focus();
     });
 
-    if (prefillQuery) {
-      placeInput.value = prefillQuery;
-      placeInput.dispatchEvent(new Event('input', { bubbles: true }));
+    confirmBtn.addEventListener('click', () => {
+      const street = searchInput.value.trim();
+      if (!street) { toast('Bitte eine Straße eingeben'); return; }
+      const address = buildAddressFromParts(street, houseInput.value.trim(), stagePlace ? stagePlace.label : '');
+      finalizeNewLocation(address, labelInput.value);
+    });
+
+    function renderPlaceResults(query, saved, places) {
+      let html = saved.map(l => `<button type="button" class="sheet-item" data-saved="${escapeHtml(l.id)}"><span>${escapeHtml(l.label)}</span>${l.label !== l.address ? `<span class="sub">${escapeHtml(l.address)}</span>` : ''}</button>`).join('');
+      html += places.map((p, i) => `<button type="button" class="sheet-item" data-place="${i}">${escapeHtml(p.label)}</button>`).join('');
+      html += `<button type="button" class="sheet-item new-item" id="addr-manual-use">„${escapeHtml(query)}" manuell als Ort verwenden</button>`;
+      resultsEl.innerHTML = html;
+      resultsEl.querySelectorAll('[data-saved]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const loc = state.locations.find(l => l.id === btn.getAttribute('data-saved'));
+          if (loc) { closeSheet(); setDraftLocation(role, loc.id); }
+        });
+      });
+      resultsEl.querySelectorAll('[data-place]').forEach(btn => {
+        btn.addEventListener('click', () => goToStreetStage(places[Number(btn.getAttribute('data-place'))]));
+      });
+      const manualBtn = resultsEl.querySelector('#addr-manual-use');
+      if (manualBtn) manualBtn.addEventListener('click', () => finalizeNewLocation(query, ''));
     }
-    setTimeout(() => placeInput.focus(), 50);
+
+    function renderStreetResults(query, streets) {
+      let html = streets.map((r, i) => `<button type="button" class="sheet-item" data-street="${i}">${escapeHtml(r.street || r.label.split(',')[0].trim())}</button>`).join('');
+      html += `<button type="button" class="sheet-item new-item" id="addr-street-manual">„${escapeHtml(query)}" übernehmen</button>`;
+      resultsEl.innerHTML = html;
+      resultsEl.querySelectorAll('[data-street]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const r = streets[Number(btn.getAttribute('data-street'))];
+          searchInput.value = r.street || r.label.split(',')[0].trim();
+          confirmRow.hidden = false;
+          houseInput.focus();
+        });
+      });
+      resultsEl.querySelector('#addr-street-manual').addEventListener('click', () => {
+        confirmRow.hidden = false;
+        houseInput.focus();
+      });
+    }
+
+    let debounceTimer = null;
+    let requestToken = 0;
+    searchInput.addEventListener('input', () => {
+      confirmRow.hidden = true;
+      clearTimeout(debounceTimer);
+      const query = searchInput.value.trim();
+      if (query.length < 2) { resultsEl.innerHTML = ''; return; }
+      debounceTimer = setTimeout(async () => {
+        const myToken = ++requestToken;
+        if (stage === 'place') {
+          const qLower = query.toLowerCase();
+          const saved = sortedByRecency(state.locations)
+            .filter(l => (l.label + ' ' + l.address).toLowerCase().includes(qLower))
+            .slice(0, 5);
+          let places = [];
+          try {
+            places = await geocodeAutocomplete(query, {
+              layers: 'locality,localadmin',
+              focusLat: ambientFocus ? ambientFocus.lat : null, focusLon: ambientFocus ? ambientFocus.lon : null,
+              boundaryCountry: 'DE,AT,CH'
+            });
+          } catch (e) { /* keep saved matches even if the live search fails */ }
+          if (myToken !== requestToken) return;
+          renderPlaceResults(query, saved, places);
+        } else {
+          let streets = [];
+          try {
+            streets = await geocodeAutocomplete(query, {
+              layers: 'street,address',
+              focusLat: stagePlace ? stagePlace.lat : null, focusLon: stagePlace ? stagePlace.lon : null,
+              boundaryGid: stagePlace ? stagePlace.gid : null,
+              boundaryLat: (stagePlace && !stagePlace.gid) ? stagePlace.lat : null,
+              boundaryLon: (stagePlace && !stagePlace.gid) ? stagePlace.lon : null,
+              boundaryRadiusKm: 15
+            });
+          } catch (e) { /* fall through to just the manual-entry option */ }
+          if (myToken !== requestToken) return;
+          const seen = new Set();
+          streets = streets.filter(r => {
+            const k = (r.street || r.label.split(',')[0].trim()).toLowerCase();
+            if (seen.has(k)) return false;
+            seen.add(k);
+            return true;
+          });
+          renderStreetResults(query, streets);
+        }
+      }, 300);
+    });
+
+    if (gpsPrefill) {
+      goToStreetStage(gpsPrefill.place);
+      searchInput.value = gpsPrefill.street;
+      houseInput.value = gpsPrefill.housenumber;
+      confirmRow.hidden = false;
+    } else {
+      setTimeout(() => searchInput.focus(), 50);
+    }
+  }
+
+  async function useGpsForRole(role) {
+    if (!navigator.geolocation) { toast('Standortbestimmung wird von diesem Gerät nicht unterstützt'); return; }
+    toast('Standort wird ermittelt…');
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        try {
+          const r = await geocodeReverse(pos.coords.latitude, pos.coords.longitude);
+          const ortLabel = [r.postalcode, r.locality || r.label].filter(Boolean).join(' ');
+          openAddressSearch(role, {
+            place: { label: ortLabel, lat: r.lat, lon: r.lon, gid: null },
+            street: r.street || '',
+            housenumber: r.housenumber || ''
+          });
+        } catch (err) {
+          toast(err && err.message === 'no-key' ? 'Kein API-Key hinterlegt' : 'Standort konnte nicht aufgelöst werden');
+        }
+      },
+      () => { toast('Standortzugriff nicht möglich oder abgelehnt'); },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
   }
 
   function openVehiclePicker() {
@@ -901,7 +980,7 @@
         </div>
       </div>
     `;
-    document.body.appendChild(backdrop);
+    appendSheet(backdrop);
     backdrop.querySelector('#sheet-close').addEventListener('click', closeSheet);
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeSheet(); });
     backdrop.querySelector('#time-save').addEventListener('click', () => {
@@ -943,7 +1022,7 @@
         </form>
       </div>
     `;
-    document.body.appendChild(backdrop);
+    appendSheet(backdrop);
     backdrop.querySelector('#sheet-close').addEventListener('click', closeSheet);
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeSheet(); });
     backdrop.querySelector('#rate-form').addEventListener('submit', (e) => {
@@ -1032,17 +1111,23 @@
       <div class="card">
         <div class="field">
           <label>Start</label>
-          <button class="picker-trigger" id="btn-pick-start">
-            <span class="${startLoc ? '' : 'placeholder'}">${startLoc ? escapeHtml(startLoc.label) : 'Startort wählen'}</span>
-            <span class="chev">›</span>
-          </button>
+          <div class="trigger-row">
+            <button class="picker-trigger" id="btn-pick-start">
+              <span class="${startLoc ? '' : 'placeholder'}">${startLoc ? escapeHtml(startLoc.label) : 'Startort wählen'}</span>
+              <span class="chev">›</span>
+            </button>
+            <button type="button" class="icon-btn" id="btn-gps-start" title="Standort verwenden" aria-label="Standort verwenden">${PIN_ICON}</button>
+          </div>
         </div>
         <div class="field">
           <label>Ziel</label>
-          <button class="picker-trigger" id="btn-pick-end">
-            <span class="${endLoc ? '' : 'placeholder'}">${endLoc ? escapeHtml(endLoc.label) : 'Ziel wählen'}</span>
-            <span class="chev">›</span>
-          </button>
+          <div class="trigger-row">
+            <button class="picker-trigger" id="btn-pick-end">
+              <span class="${endLoc ? '' : 'placeholder'}">${endLoc ? escapeHtml(endLoc.label) : 'Ziel wählen'}</span>
+              <span class="chev">›</span>
+            </button>
+            <button type="button" class="icon-btn" id="btn-gps-end" title="Standort verwenden" aria-label="Standort verwenden">${PIN_ICON}</button>
+          </div>
         </div>
         <div class="field">
           <label>Entfernung</label>
@@ -1091,8 +1176,10 @@
   }
 
   function attachNewViewHandlers() {
-    document.getElementById('btn-pick-start').addEventListener('click', () => openLocationPicker('start'));
-    document.getElementById('btn-pick-end').addEventListener('click', () => openLocationPicker('end'));
+    document.getElementById('btn-pick-start').addEventListener('click', () => openAddressSearch('start'));
+    document.getElementById('btn-pick-end').addEventListener('click', () => openAddressSearch('end'));
+    document.getElementById('btn-gps-start').addEventListener('click', () => useGpsForRole('start'));
+    document.getElementById('btn-gps-end').addEventListener('click', () => useGpsForRole('end'));
     document.getElementById('btn-pick-vehicle').addEventListener('click', openVehiclePicker);
     document.getElementById('btn-save-trip').addEventListener('click', saveTrip);
     const cancelBtn = document.getElementById('btn-cancel-edit');
@@ -1158,7 +1245,8 @@
               <span class="trip-route">${escapeHtml(locationLabel(trip.startLocationId))} → ${escapeHtml(locationLabel(trip.endLocationId))}</span>
               <span class="trip-km">${distText}</span>
             </div>
-            <div class="trip-meta">${formatDateTime(trip.startDateTime)}${trip.endDateTime ? ' – ' + formatDateTime(trip.endDateTime) : ''} · ${escapeHtml(trip.vehiclePlate)}${trip.ratePerKm != null ? ' · ' + formatEuroPerKm(trip.ratePerKm) : ''}</div>
+            <div class="trip-meta">${formatDateTime(trip.startDateTime)}${trip.endDateTime ? ' – ' + formatDateTime(trip.endDateTime) : ' · <span class="warn-text">keine Rückkehrzeit</span>'}</div>
+            <div class="trip-meta">${escapeHtml(trip.vehiclePlate)}${trip.ratePerKm != null ? ' · ' + formatEuroPerKm(trip.ratePerKm) : ''}</div>
             ${trip.note ? `<div class="trip-note">${escapeHtml(trip.note)}</div>` : ''}
             ${trip.distanceStatus === 'pending' ? `<div class="hint">${escapeHtml(trip.distanceError || 'Distanz wird nachgeholt, sobald Internet verfügbar ist.')}</div>` : ''}
             ${trip.distanceStatus === 'ok' && trip.cost == null ? `<div class="hint">Kein Kilometersatz für dieses Datum hinterlegt.</div>` : ''}

@@ -239,6 +239,54 @@ button {
 
 /* ---- Picker (location / vehicle) ---- */
 
+.trigger-row {
+  display: flex;
+  gap: 8px;
+}
+
+.trigger-row .picker-trigger {
+  flex: 1;
+  min-width: 0;
+}
+
+.icon-btn {
+  flex-shrink: 0;
+  width: 46px;
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.icon-btn:active { background: var(--bg-elevated); }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 7px 8px 7px 14px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.chip button {
+  background: var(--bg-elevated);
+  border: none;
+  color: var(--text-faint);
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  font-size: 15px;
+  line-height: 1;
+}
+
 .picker-trigger {
   width: 100%;
   text-align: left;
@@ -470,6 +518,11 @@ button {
   color: var(--text-faint);
   font-size: 14px;
   pointer-events: none;
+}
+
+.warn-text {
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .hint {
