@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.5.0';
+  const APP_VERSION = '1.5.1';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -811,7 +811,11 @@
     function renderPlaceResults(query, saved, places) {
       let html = saved.map(l => `<button type="button" class="sheet-item" data-saved="${escapeHtml(l.id)}"><span>${escapeHtml(l.label)}</span>${l.label !== l.address ? `<span class="sub">${escapeHtml(l.address)}</span>` : ''}</button>`).join('');
       html += places.map((p, i) => `<button type="button" class="sheet-item" data-place="${i}">${escapeHtml(p.label)}</button>`).join('');
-      html += `<button type="button" class="sheet-item new-item" id="addr-manual-use">„${escapeHtml(query)}" manuell als Ort verwenden</button>`;
+      if (query) {
+        html += `<button type="button" class="sheet-item new-item" id="addr-manual-use">„${escapeHtml(query)}" manuell als Ort verwenden</button>`;
+      } else if (!html) {
+        html = `<div class="hint" style="padding:10px 4px;">Noch keine Adressen gespeichert. Ort eingeben, um zu suchen.</div>`;
+      }
       resultsEl.innerHTML = html;
       resultsEl.querySelectorAll('[data-saved]').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -850,7 +854,11 @@
       confirmRow.hidden = true;
       clearTimeout(debounceTimer);
       const query = searchInput.value.trim();
-      if (query.length < 2) { resultsEl.innerHTML = ''; return; }
+      if (query.length < 2) {
+        if (stage === 'place' && !query) renderPlaceResults('', sortedByRecency(state.locations), []);
+        else resultsEl.innerHTML = '';
+        return;
+      }
       debounceTimer = setTimeout(async () => {
         const myToken = ++requestToken;
         if (stage === 'place') {
@@ -899,6 +907,7 @@
       houseInput.value = gpsPrefill.housenumber;
       confirmRow.hidden = false;
     } else {
+      renderPlaceResults('', sortedByRecency(state.locations), []);
       setTimeout(() => searchInput.focus(), 50);
     }
   }

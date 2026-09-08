@@ -10,6 +10,7 @@
   --accent-dim: #a8781f;
   --accent-text: #1a1206;
   --danger: #e35d5d;
+  --warn: #c77dff;
   --ok: #4fb87a;
   --radius-lg: 18px;
   --radius-md: 12px;
@@ -521,7 +522,7 @@ button {
 }
 
 .warn-text {
-  color: var(--accent);
+  color: var(--warn);
   font-weight: 600;
 }
 
