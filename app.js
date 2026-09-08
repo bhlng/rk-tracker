@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.5.3';
+  const APP_VERSION = '1.5.4';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -346,6 +346,11 @@
     return Math.round((meters / 1000) * 10) / 10;
   }
 
+  // Session-lifetime cache: identical autocomplete requests (same text, same
+  // stage/scope) are common while typing, backspacing and retyping, or during
+  // testing - avoid re-spending quota on a query already answered.
+  const autocompleteCache = new Map();
+
   async function geocodeAutocomplete(text, opts = {}) {
     const key = state.settings.orsApiKey;
     if (!key || !text || text.trim().length < 2) return [];
@@ -363,6 +368,8 @@
       params.set('boundary.circle.radius', String(opts.boundaryRadiusKm || 20));
     }
     if (opts.boundaryCountry) params.set('boundary.country', opts.boundaryCountry);
+    const cacheKey = params.toString();
+    if (autocompleteCache.has(cacheKey)) return autocompleteCache.get(cacheKey);
     const res = await fetch(`${ORS_BASE}/geocode/autocomplete?${params.toString()}`);
     if (!res.ok) {
       let msg = 'autocomplete-failed';
@@ -370,7 +377,7 @@
       throw new Error(msg);
     }
     const data = await res.json();
-    return (data.features || []).map(f => ({
+    const results = (data.features || []).map(f => ({
       label: f.properties.label,
       lat: f.geometry.coordinates[1],
       lon: f.geometry.coordinates[0],
@@ -379,6 +386,8 @@
       street: f.properties.street || '',
       housenumber: f.properties.housenumber || ''
     }));
+    autocompleteCache.set(cacheKey, results);
+    return results;
   }
 
   async function geocodeReverse(lat, lon) {
