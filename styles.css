@@ -441,6 +441,18 @@ button {
   box-shadow: 0 8px 24px rgba(0,0,0,0.4);
 }
 
+.autocomplete-list {
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--bg-elevated-2);
+}
+
+.autocomplete-list .sheet-item {
+  padding: 11px 12px;
+}
+
 .input-suffix {
   position: relative;
 }

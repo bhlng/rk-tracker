@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.3.1';
+  const APP_VERSION = '1.4.0';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
 
@@ -105,6 +105,67 @@
   function combineDateTime(date, time) {
     if (!date) return '';
     return `${date}T${time || '00:00'}`;
+  }
+
+  function buildAddressFromParts(street, housenumber, ortLabel) {
+    const streetPart = [street, housenumber].filter(s => s && s.trim()).join(' ');
+    return [streetPart, ortLabel].filter(s => s && s.trim()).join(', ');
+  }
+
+  // Wires a text input to a live-search dropdown. `layers`/`getFocus`/`getBoundary`
+  // shape the geocode/autocomplete request; `onSelect(result)` fires on pick.
+  // Best-effort, silent-fail location bias so short place queries (e.g. "Zü") rank
+  // the geographically nearby match first instead of an arbitrary global one.
+  let ambientFocus = null;
+  function requestAmbientFocus() {
+    if (ambientFocus || !navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => { ambientFocus = { lat: pos.coords.latitude, lon: pos.coords.longitude }; },
+      () => { /* denied/unavailable: searches simply stay unbiased */ },
+      { maximumAge: 10 * 60 * 1000, timeout: 5000 }
+    );
+  }
+
+  function attachAutocomplete(inputEl, listEl, { layers, getFocus, getBoundary, onSelect }) {
+    let debounceTimer = null;
+    let requestToken = 0;
+    inputEl.addEventListener('input', () => {
+      clearTimeout(debounceTimer);
+      const query = inputEl.value.trim();
+      if (query.length < 2) { listEl.innerHTML = ''; listEl.hidden = true; return; }
+      debounceTimer = setTimeout(async () => {
+        const myToken = ++requestToken;
+        let results;
+        try {
+          const focus = getFocus ? getFocus() : null;
+          const boundary = getBoundary ? getBoundary() : null;
+          results = await geocodeAutocomplete(query, {
+            layers,
+            focusLat: focus ? focus.lat : null, focusLon: focus ? focus.lon : null,
+            boundaryLat: boundary ? boundary.lat : null, boundaryLon: boundary ? boundary.lon : null,
+            boundaryRadiusKm: boundary ? boundary.radiusKm : null
+          });
+        } catch (e) {
+          if (myToken === requestToken) listEl.hidden = true;
+          return;
+        }
+        if (myToken !== requestToken) return; // a newer keystroke already superseded this
+        if (!results.length) {
+          listEl.innerHTML = state.settings.orsApiKey ? `<div class="hint" style="padding:8px 4px;">Keine Treffer</div>` : `<div class="hint" style="padding:8px 4px;">Kein API-Key hinterlegt — Adresse manuell eingeben</div>`;
+          listEl.hidden = false;
+          return;
+        }
+        listEl.innerHTML = results.map((r, i) => `<button type="button" class="sheet-item" data-idx="${i}">${escapeHtml(r.label)}</button>`).join('');
+        listEl.hidden = false;
+        listEl.querySelectorAll('[data-idx]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            onSelect(results[Number(btn.getAttribute('data-idx'))]);
+            listEl.innerHTML = '';
+            listEl.hidden = true;
+          });
+        });
+      }, 350);
+    });
   }
 
   function todayDateStr() {
@@ -264,6 +325,53 @@
     if (!feat) throw new Error('directions-empty');
     const meters = feat.properties.summary.distance;
     return Math.round((meters / 1000) * 10) / 10;
+  }
+
+  async function geocodeAutocomplete(text, opts = {}) {
+    const key = state.settings.orsApiKey;
+    if (!key || !text || text.trim().length < 2) return [];
+    const params = new URLSearchParams({ api_key: key, text: text.trim(), size: String(opts.size || 6) });
+    if (opts.layers) params.set('layers', opts.layers);
+    if (opts.focusLat != null) {
+      params.set('focus.point.lat', opts.focusLat);
+      params.set('focus.point.lon', opts.focusLon);
+    }
+    if (opts.boundaryLat != null) {
+      params.set('boundary.circle.lat', opts.boundaryLat);
+      params.set('boundary.circle.lon', opts.boundaryLon);
+      params.set('boundary.circle.radius', String(opts.boundaryRadiusKm || 20));
+    }
+    const res = await fetch(`${ORS_BASE}/geocode/autocomplete?${params.toString()}`);
+    if (!res.ok) throw new Error('autocomplete-failed');
+    const data = await res.json();
+    return (data.features || []).map(f => ({
+      label: f.properties.label,
+      lat: f.geometry.coordinates[1],
+      lon: f.geometry.coordinates[0],
+      layer: f.properties.layer,
+      street: f.properties.street || '',
+      housenumber: f.properties.housenumber || ''
+    }));
+  }
+
+  async function geocodeReverse(lat, lon) {
+    const key = state.settings.orsApiKey;
+    if (!key) { const e = new Error('no-key'); throw e; }
+    const params = new URLSearchParams({ api_key: key, 'point.lat': lat, 'point.lon': lon, size: '1' });
+    const res = await fetch(`${ORS_BASE}/geocode/reverse?${params.toString()}`);
+    if (!res.ok) throw new Error('reverse-failed');
+    const data = await res.json();
+    const feat = data.features && data.features[0];
+    if (!feat) throw new Error('reverse-empty');
+    const p = feat.properties;
+    return {
+      label: p.label,
+      street: p.street || '',
+      housenumber: p.housenumber || '',
+      locality: p.locality || p.county || p.region || '',
+      lat: feat.geometry.coordinates[1],
+      lon: feat.geometry.coordinates[0]
+    };
   }
 
   async function ensureLocationGeocoded(loc) {
@@ -587,7 +695,7 @@
     });
   }
 
-  function openLocationCreateForm(role, prefillAddress) {
+  function openLocationCreateForm(role, prefillQuery) {
     closeSheet();
     const backdrop = document.createElement('div');
     backdrop.id = 'sheet-backdrop';
@@ -604,9 +712,20 @@
             <label for="new-loc-label">Bezeichnung (optional)</label>
             <input type="text" id="new-loc-label" placeholder="z. B. Büro Zürich" enterkeyhint="next">
           </div>
+          <button type="button" class="btn-secondary" id="btn-use-location" style="width:100%; margin-bottom:18px;">Aktuellen Standort verwenden</button>
           <div class="field">
-            <label for="new-loc-address">Adresse</label>
-            <input type="text" id="new-loc-address" placeholder="Straße, PLZ, Ort" value="${escapeHtml(prefillAddress || '')}" enterkeyhint="done">
+            <label for="new-loc-place">Ort</label>
+            <input type="text" id="new-loc-place" placeholder="z. B. Zürich" autocomplete="off" autocapitalize="words" enterkeyhint="next">
+            <div class="autocomplete-list" id="new-loc-place-list" hidden></div>
+          </div>
+          <div class="field">
+            <label for="new-loc-street">Straße</label>
+            <input type="text" id="new-loc-street" placeholder="Erst Ort wählen" autocomplete="off" autocapitalize="words" enterkeyhint="next" disabled>
+            <div class="autocomplete-list" id="new-loc-street-list" hidden></div>
+          </div>
+          <div class="field">
+            <label for="new-loc-housenumber">Hausnummer (optional)</label>
+            <input type="text" id="new-loc-housenumber" placeholder="1" inputmode="numeric" enterkeyhint="done">
           </div>
           <button type="submit" class="btn-primary" id="new-loc-save">Adresse speichern & auswählen</button>
         </form>
@@ -615,10 +734,80 @@
     document.body.appendChild(backdrop);
     backdrop.querySelector('#sheet-close').addEventListener('click', closeSheet);
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeSheet(); });
+
+    let selectedPlace = null; // {label, lat, lon} once a suggestion was picked
+    const placeInput = backdrop.querySelector('#new-loc-place');
+    const placeList = backdrop.querySelector('#new-loc-place-list');
+    const streetInput = backdrop.querySelector('#new-loc-street');
+    const streetList = backdrop.querySelector('#new-loc-street-list');
+    const houseInput = backdrop.querySelector('#new-loc-housenumber');
+
+    function setStreetEnabled(enabled) {
+      streetInput.disabled = !enabled;
+      streetInput.placeholder = enabled ? 'z. B. Bahnhofstrasse' : 'Erst Ort wählen';
+    }
+
+    placeInput.addEventListener('input', () => {
+      selectedPlace = null;
+      setStreetEnabled(false);
+    });
+    placeInput.addEventListener('focus', requestAmbientFocus, { once: true });
+
+    attachAutocomplete(placeInput, placeList, {
+      layers: 'locality,localadmin,borough,neighbourhood,county,region',
+      getFocus: () => ambientFocus,
+      onSelect: (r) => {
+        placeInput.value = r.label;
+        selectedPlace = r;
+        setStreetEnabled(true);
+        streetInput.value = '';
+        streetInput.focus();
+      }
+    });
+
+    attachAutocomplete(streetInput, streetList, {
+      layers: 'street,address',
+      getFocus: () => selectedPlace ? { lat: selectedPlace.lat, lon: selectedPlace.lon } : null,
+      getBoundary: () => selectedPlace ? { lat: selectedPlace.lat, lon: selectedPlace.lon, radiusKm: 20 } : null,
+      onSelect: (r) => {
+        streetInput.value = r.street || r.label.split(',')[0].trim();
+        if (r.housenumber) houseInput.value = r.housenumber;
+      }
+    });
+
+    backdrop.querySelector('#btn-use-location').addEventListener('click', (e) => {
+      const btn = e.currentTarget;
+      if (!navigator.geolocation) { toast('Standortbestimmung wird von diesem Gerät nicht unterstützt'); return; }
+      btn.disabled = true;
+      btn.textContent = 'Standort wird ermittelt…';
+      const reset = () => { btn.disabled = false; btn.textContent = 'Aktuellen Standort verwenden'; };
+      navigator.geolocation.getCurrentPosition(
+        async (pos) => {
+          try {
+            const r = await geocodeReverse(pos.coords.latitude, pos.coords.longitude);
+            const ortLabel = r.locality || r.label;
+            placeInput.value = ortLabel;
+            selectedPlace = { label: ortLabel, lat: r.lat, lon: r.lon };
+            setStreetEnabled(true);
+            streetInput.value = r.street || '';
+            houseInput.value = r.housenumber || '';
+            toast('Standort übernommen — bitte prüfen, v. a. die Hausnummer');
+          } catch (err) {
+            toast(err && err.message === 'no-key' ? 'Kein API-Key hinterlegt' : 'Standort konnte nicht aufgelöst werden');
+          } finally {
+            reset();
+          }
+        },
+        () => { toast('Standortzugriff nicht möglich oder abgelehnt'); reset(); },
+        { enableHighAccuracy: true, timeout: 10000 }
+      );
+    });
+
     backdrop.querySelector('#new-loc-form').addEventListener('submit', (e) => {
       e.preventDefault();
-      const address = backdrop.querySelector('#new-loc-address').value.trim();
-      if (!address) { toast('Bitte eine Adresse eingeben'); return; }
+      const ortLabel = selectedPlace ? selectedPlace.label : placeInput.value.trim();
+      const address = buildAddressFromParts(streetInput.value.trim(), houseInput.value.trim(), ortLabel);
+      if (!address) { toast('Bitte mindestens einen Ort angeben'); return; }
       const label = backdrop.querySelector('#new-loc-label').value.trim() || address;
       const loc = { id: uid(), label, address, lat: null, lon: null, usageCount: 0, lastUsedAt: null };
       state.locations.push(loc);
@@ -626,7 +815,12 @@
       closeSheet();
       setDraftLocation(role, loc.id);
     });
-    setTimeout(() => backdrop.querySelector('#new-loc-address').focus(), 50);
+
+    if (prefillQuery) {
+      placeInput.value = prefillQuery;
+      placeInput.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    setTimeout(() => placeInput.focus(), 50);
   }
 
   function openVehiclePicker() {
