@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.3.0';
+  const APP_VERSION = '1.3.1';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
 
@@ -653,6 +653,56 @@
     });
   }
 
+  function openTimeEditor(role) {
+    closeSheet();
+    const current = role === 'start' ? draft.startDateTime : draft.endDateTime;
+    const { time } = splitDateTime(current);
+    const [curH, curM] = time ? time.split(':') : ['', ''];
+    const hourOptions = Array.from({ length: 24 }, (_, i) => pad(i));
+    const minuteOptions = Array.from({ length: 60 }, (_, i) => pad(i));
+    const backdrop = document.createElement('div');
+    backdrop.id = 'sheet-backdrop';
+    backdrop.className = 'sheet-backdrop';
+    backdrop.innerHTML = `
+      <div class="sheet" role="dialog">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+          <h2>Uhrzeit ${role === 'start' ? '(Start)' : '(Rückkehr)'}</h2>
+          <button class="btn-text" id="sheet-close">Abbrechen</button>
+        </div>
+        <div style="padding: 10px 18px 24px; display:flex; gap:10px; align-items:center; justify-content:center;">
+          <select id="time-hour" style="text-align:center; flex:1; font-size:18px;">
+            ${hourOptions.map(h => `<option value="${h}" ${h === curH ? 'selected' : ''}>${h}</option>`).join('')}
+          </select>
+          <span style="font-size:22px; font-weight:700; color:var(--text-dim);">:</span>
+          <select id="time-minute" style="text-align:center; flex:1; font-size:18px;">
+            ${minuteOptions.map(m => `<option value="${m}" ${m === curM ? 'selected' : ''}>${m}</option>`).join('')}
+          </select>
+        </div>
+        <div style="padding:0 18px 4px;">
+          <button type="button" class="btn-primary" id="time-save" style="width:100%;">Übernehmen</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(backdrop);
+    backdrop.querySelector('#sheet-close').addEventListener('click', closeSheet);
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeSheet(); });
+    backdrop.querySelector('#time-save').addEventListener('click', () => {
+      const h = backdrop.querySelector('#time-hour').value;
+      const m = backdrop.querySelector('#time-minute').value;
+      const datePart = splitDateTime(current).date || todayDateStr();
+      const newVal = `${datePart}T${h}:${m}`;
+      if (role === 'start') {
+        draft.startDateTime = newVal;
+        computeCost(draft);
+      } else {
+        draft.endDateTime = newVal;
+      }
+      closeSheet();
+      render();
+    });
+  }
+
   function openRateEditor() {
     closeSheet();
     const backdrop = document.createElement('div');
@@ -785,14 +835,20 @@
           <label>Start</label>
           <div class="two-col">
             <input type="date" id="input-start-date" value="${escapeHtml(splitDateTime(draft.startDateTime).date)}">
-            <input type="time" id="input-start-time" value="${escapeHtml(splitDateTime(draft.startDateTime).time)}">
+            <button type="button" class="picker-trigger" id="btn-pick-start-time">
+              <span class="${splitDateTime(draft.startDateTime).time ? '' : 'placeholder'}">${splitDateTime(draft.startDateTime).time || 'Uhrzeit'}</span>
+              <span class="chev">›</span>
+            </button>
           </div>
         </div>
         <div class="field">
           <label>Rückkehr (optional)</label>
           <div class="two-col">
             <input type="date" id="input-end-date" value="${escapeHtml(splitDateTime(draft.endDateTime).date)}">
-            <input type="time" id="input-end-time" value="${escapeHtml(splitDateTime(draft.endDateTime).time)}">
+            <button type="button" class="picker-trigger" id="btn-pick-end-time">
+              <span class="${splitDateTime(draft.endDateTime).time ? '' : 'placeholder'}">${splitDateTime(draft.endDateTime).time || 'Uhrzeit'}</span>
+              <span class="chev">›</span>
+            </button>
           </div>
         </div>
         <div class="field">
@@ -826,20 +882,19 @@
     if (cancelBtn) cancelBtn.addEventListener('click', cancelEdit);
 
     const startDateEl = document.getElementById('input-start-date');
-    const startTimeEl = document.getElementById('input-start-time');
-    const updateStart = () => {
-      draft.startDateTime = combineDateTime(startDateEl.value, startTimeEl.value);
+    startDateEl.addEventListener('change', () => {
+      draft.startDateTime = combineDateTime(startDateEl.value, splitDateTime(draft.startDateTime).time);
       computeCost(draft);
       render();
-    };
-    startDateEl.addEventListener('change', updateStart);
-    startTimeEl.addEventListener('change', updateStart);
+    });
+    document.getElementById('btn-pick-start-time').addEventListener('click', () => openTimeEditor('start'));
 
     const endDateEl = document.getElementById('input-end-date');
-    const endTimeEl = document.getElementById('input-end-time');
-    const updateEnd = () => { draft.endDateTime = combineDateTime(endDateEl.value, endTimeEl.value); };
-    endDateEl.addEventListener('change', updateEnd);
-    endTimeEl.addEventListener('change', updateEnd);
+    endDateEl.addEventListener('change', () => {
+      draft.endDateTime = combineDateTime(endDateEl.value, splitDateTime(draft.endDateTime).time);
+      render();
+    });
+    document.getElementById('btn-pick-end-time').addEventListener('click', () => openTimeEditor('end'));
     document.getElementById('btn-edit-rate').addEventListener('click', openRateEditor);
     const noteEl = document.getElementById('input-note');
     noteEl.addEventListener('input', (e) => {
