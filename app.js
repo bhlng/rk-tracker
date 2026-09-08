@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.5.2';
+  const APP_VERSION = '1.5.3';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -106,6 +106,12 @@
   function combineDateTime(date, time) {
     if (!date) return '';
     return `${date}T${time || '00:00'}`;
+  }
+
+  function describeGeocodeError(e) {
+    if (e && e.message === 'Quota exceeded') return 'Tageskontingent der Adress-Suche erschöpft — bitte später erneut versuchen oder unten manuell eingeben.';
+    if (e && e.message === 'no-key') return 'Kein API-Key hinterlegt — bitte unten manuell eingeben.';
+    return 'Live-Suche momentan nicht verfügbar — bitte unten manuell eingeben.';
   }
 
   function buildAddressFromParts(street, housenumber, ortLabel) {
@@ -358,7 +364,11 @@
     }
     if (opts.boundaryCountry) params.set('boundary.country', opts.boundaryCountry);
     const res = await fetch(`${ORS_BASE}/geocode/autocomplete?${params.toString()}`);
-    if (!res.ok) throw new Error('autocomplete-failed');
+    if (!res.ok) {
+      let msg = 'autocomplete-failed';
+      try { const errBody = await res.json(); if (errBody && errBody.error) msg = errBody.error; } catch (e2) { /* keep generic message */ }
+      throw new Error(msg);
+    }
     const data = await res.json();
     return (data.features || []).map(f => ({
       label: f.properties.label,
@@ -808,9 +818,10 @@
       finalizeNewLocation(address, labelInput.value);
     });
 
-    function renderPlaceResults(query, saved, places) {
+    function renderPlaceResults(query, saved, places, errorHint) {
       let html = saved.map(l => `<button type="button" class="sheet-item" data-saved="${escapeHtml(l.id)}"><span>${escapeHtml(l.label)}</span>${l.label !== l.address ? `<span class="sub">${escapeHtml(l.address)}</span>` : ''}</button>`).join('');
       html += places.map((p, i) => `<button type="button" class="sheet-item" data-place="${i}">${escapeHtml(p.label)}</button>`).join('');
+      if (errorHint) html += `<div class="hint" style="padding:8px 4px; color:var(--warn);">${escapeHtml(errorHint)}</div>`;
       if (query) {
         html += `<button type="button" class="sheet-item new-item" id="addr-manual-use">„${escapeHtml(query)}" manuell als Ort verwenden</button>`;
       } else if (!html) {
@@ -830,8 +841,9 @@
       if (manualBtn) manualBtn.addEventListener('click', () => finalizeNewLocation(query, ''));
     }
 
-    function renderStreetResults(query, streets) {
+    function renderStreetResults(query, streets, errorHint) {
       let html = streets.map((r, i) => `<button type="button" class="sheet-item" data-street="${i}">${escapeHtml(r.street || r.label.split(',')[0].trim())}</button>`).join('');
+      if (errorHint) html += `<div class="hint" style="padding:8px 4px; color:var(--warn);">${escapeHtml(errorHint)}</div>`;
       html += `<button type="button" class="sheet-item new-item" id="addr-street-manual">„${escapeHtml(query)}" übernehmen</button>`;
       resultsEl.innerHTML = html;
       resultsEl.querySelectorAll('[data-street]').forEach(btn => {
@@ -867,27 +879,37 @@
             .filter(l => (l.label + ' ' + l.address).toLowerCase().includes(qLower))
             .slice(0, 5);
           let places = [];
-          try {
-            places = await geocodeAutocomplete(query, {
-              layers: 'locality,localadmin',
-              focusLat: ambientFocus ? ambientFocus.lat : null, focusLon: ambientFocus ? ambientFocus.lon : null,
-              boundaryCountry: 'DE,AT,CH'
-            });
-          } catch (e) { /* keep saved matches even if the live search fails */ }
+          let errorHint = null;
+          if (!state.settings.orsApiKey) {
+            errorHint = describeGeocodeError({ message: 'no-key' });
+          } else {
+            try {
+              places = await geocodeAutocomplete(query, {
+                layers: 'locality,localadmin',
+                focusLat: ambientFocus ? ambientFocus.lat : null, focusLon: ambientFocus ? ambientFocus.lon : null,
+                boundaryCountry: 'DE,AT,CH'
+              });
+            } catch (e) { errorHint = describeGeocodeError(e); }
+          }
           if (myToken !== requestToken) return;
-          renderPlaceResults(query, saved, places);
+          renderPlaceResults(query, saved, places, errorHint);
         } else {
           let streets = [];
-          try {
-            streets = await geocodeAutocomplete(query, {
-              layers: 'street,address',
-              focusLat: stagePlace ? stagePlace.lat : null, focusLon: stagePlace ? stagePlace.lon : null,
-              boundaryGid: stagePlace ? stagePlace.gid : null,
-              boundaryLat: (stagePlace && !stagePlace.gid) ? stagePlace.lat : null,
-              boundaryLon: (stagePlace && !stagePlace.gid) ? stagePlace.lon : null,
-              boundaryRadiusKm: 15
-            });
-          } catch (e) { /* fall through to just the manual-entry option */ }
+          let errorHint = null;
+          if (!state.settings.orsApiKey) {
+            errorHint = describeGeocodeError({ message: 'no-key' });
+          } else {
+            try {
+              streets = await geocodeAutocomplete(query, {
+                layers: 'street,address',
+                focusLat: stagePlace ? stagePlace.lat : null, focusLon: stagePlace ? stagePlace.lon : null,
+                boundaryGid: stagePlace ? stagePlace.gid : null,
+                boundaryLat: (stagePlace && !stagePlace.gid) ? stagePlace.lat : null,
+                boundaryLon: (stagePlace && !stagePlace.gid) ? stagePlace.lon : null,
+                boundaryRadiusKm: 15
+              });
+            } catch (e) { errorHint = describeGeocodeError(e); }
+          }
           if (myToken !== requestToken) return;
           const seen = new Set();
           streets = streets.filter(r => {
@@ -896,7 +918,7 @@
             seen.add(k);
             return true;
           });
-          renderStreetResults(query, streets);
+          renderStreetResults(query, streets, errorHint);
         }
       }, 300);
     });
