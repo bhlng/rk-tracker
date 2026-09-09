@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '1.7.0';
+  const APP_VERSION = '2.0.0';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -28,6 +28,7 @@
     try {
       localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(state[key]));
     } catch (e) { /* localStorage unavailable */ }
+    if (!applyingRemoteUpdate && CLOUD_SYNCED_KEYS.includes(key)) pushToCloud(key);
   }
 
   const state = {
@@ -1153,6 +1154,156 @@
     }
   }
 
+  // ---------- Cloud sync (Firebase) ----------
+  const CLOUD_SYNCED_KEYS = ['trips', 'locations', 'vehicles', 'rates', 'settings']; // not routeCache: regenerable, no data-loss risk
+
+  const firebaseConfig = {
+    apiKey: 'AIzaSyDLfAXQUAWnv31czdwS_u4OZ_FnTlTolbI',
+    authDomain: 'reisekosten-tracker.firebaseapp.com',
+    projectId: 'reisekosten-tracker',
+    storageBucket: 'reisekosten-tracker.firebasestorage.app',
+    messagingSenderId: '234123683497',
+    appId: '1:234123683497:web:8127fbc2b126583188ebb8'
+  };
+
+  let fbAuth = null;
+  let fbDb = null;
+  try {
+    if (window.firebase) {
+      firebase.initializeApp(firebaseConfig);
+      fbAuth = firebase.auth();
+      fbDb = firebase.firestore();
+      fbDb.enablePersistence().catch(() => { /* multiple open tabs, or unsupported browser - falls back to network-only */ });
+    }
+  } catch (e) { /* Firebase SDK failed to load (e.g. offline on first load) - app still works fully offline/local */ }
+
+  let currentUser = null;
+  let cloudSyncStatus = 'signed-out'; // 'signed-out' | 'syncing' | 'synced' | 'error'
+  let cloudUnsubscribers = [];
+  let applyingRemoteUpdate = false;
+
+  function cloudSyncStatusText() {
+    if (cloudSyncStatus === 'syncing') return 'Wird synchronisiert…';
+    if (cloudSyncStatus === 'error') return 'Sync-Fehler — Daten bleiben lokal gespeichert';
+    if (cloudSyncStatus === 'synced') return 'Synchronisiert';
+    return '';
+  }
+
+  function keyToDocData(key) {
+    return key === 'settings' ? state.settings : { items: state[key] };
+  }
+
+  function applyDocDataToKey(key, data) {
+    if (key === 'settings') {
+      state.settings = (data && typeof data === 'object') ? data : { orsApiKey: '' };
+    } else {
+      state[key] = (data && Array.isArray(data.items)) ? data.items : [];
+    }
+  }
+
+  function pushToCloud(key) {
+    if (!currentUser || !fbDb) return;
+    fbDb.collection('users').doc(currentUser.uid).collection('data').doc(key)
+      .set(keyToDocData(key))
+      .catch(() => { /* offline - Firestore queues the write and retries automatically */ });
+  }
+
+  function detachCloudListeners() {
+    cloudUnsubscribers.forEach((unsub) => { try { unsub(); } catch (e) { /* already detached */ } });
+    cloudUnsubscribers = [];
+  }
+
+  function attachCloudListeners(userDocsRef) {
+    detachCloudListeners();
+    CLOUD_SYNCED_KEYS.forEach((key) => {
+      const unsub = userDocsRef.doc(key).onSnapshot(
+        (snap) => {
+          if (snap.metadata.hasPendingWrites) return; // echo of our own just-sent write
+          applyingRemoteUpdate = true;
+          applyDocDataToKey(key, snap.exists ? snap.data() : null);
+          saveKey(key);
+          applyingRemoteUpdate = false;
+          if (key === 'rates') {
+            for (const t of state.trips) computeCost(t);
+          }
+          render();
+        },
+        () => { cloudSyncStatus = 'error'; render(); }
+      );
+      cloudUnsubscribers.push(unsub);
+    });
+  }
+
+  async function handleSignedIn(user) {
+    currentUser = user;
+    cloudSyncStatus = 'syncing';
+    render();
+    const userDocsRef = fbDb.collection('users').doc(user.uid).collection('data');
+    try {
+      const settingsSnap = await userDocsRef.doc('settings').get();
+      const cloudHasData = settingsSnap.exists;
+      const localHasData = state.trips.length || state.locations.length || state.vehicles.length || state.rates.length;
+
+      if (!cloudHasData && localHasData) {
+        const ok = await confirmDialog('Lokale Daten in die Cloud hochladen? Damit stehen sie auch auf deinen anderen Geräten zur Verfügung.', 'Hochladen');
+        if (ok) {
+          for (const key of CLOUD_SYNCED_KEYS) {
+            await userDocsRef.doc(key).set(keyToDocData(key));
+          }
+        }
+      } else if (cloudHasData && localHasData) {
+        const ok = await confirmDialog('In der Cloud sind bereits Daten von einem anderen Gerät vorhanden. Jetzt laden? Die lokalen Daten auf diesem Gerät werden dabei ersetzt.', 'Cloud-Daten laden');
+        if (ok) {
+          for (const key of CLOUD_SYNCED_KEYS) {
+            const snap = await userDocsRef.doc(key).get();
+            applyingRemoteUpdate = true;
+            applyDocDataToKey(key, snap.exists ? snap.data() : null);
+            saveKey(key);
+            applyingRemoteUpdate = false;
+          }
+        }
+      }
+      attachCloudListeners(userDocsRef);
+      cloudSyncStatus = 'synced';
+    } catch (e) {
+      cloudSyncStatus = 'error';
+    }
+    render();
+  }
+
+  function signInWithGoogle() {
+    if (!fbAuth) { toast('Cloud-Anmeldung nicht verfügbar'); return; }
+    const provider = new firebase.auth.GoogleAuthProvider();
+    fbAuth.signInWithRedirect(provider);
+  }
+
+  function signOutCloud() {
+    detachCloudListeners();
+    currentUser = null;
+    cloudSyncStatus = 'signed-out';
+    if (fbAuth) fbAuth.signOut();
+    render();
+  }
+
+  async function initCloudAuth() {
+    if (!fbAuth) return;
+    try {
+      await fbAuth.getRedirectResult();
+    } catch (e) {
+      toast('Google-Anmeldung fehlgeschlagen');
+    }
+    fbAuth.onAuthStateChanged((user) => {
+      if (user) {
+        handleSignedIn(user);
+      } else {
+        currentUser = null;
+        cloudSyncStatus = 'signed-out';
+        detachCloudListeners();
+        if (currentView === 'settings') render();
+      }
+    });
+  }
+
   // ---------- Settings ----------
   function saveApiKey() {
     const input = document.getElementById('ors-key-input');
@@ -1411,6 +1562,17 @@
       : `<div class="hint">Noch kein Kilometersatz hinterlegt. Ohne Satz werden keine Kosten berechnet.</div>`;
 
     return `
+      <div class="section-title">Cloud-Synchronisation</div>
+      <div class="card">
+        ${currentUser ? `
+          <div class="hint" style="margin:0 0 14px;">Angemeldet als ${escapeHtml(currentUser.email || currentUser.displayName || '')} · ${cloudSyncStatusText()}</div>
+          <button class="btn-secondary" id="btn-cloud-signout" style="width:100%;">Abmelden</button>
+        ` : `
+          <div class="hint" style="margin:0 0 14px;">Melde dich an, um Reisen, Adressen, Fahrzeuge und Kilometersätze automatisch zwischen iPhone, iPad und Mac zu synchronisieren.</div>
+          <button class="btn-primary" id="btn-cloud-signin" style="width:100%;">Mit Google anmelden</button>
+        `}
+      </div>
+
       <div class="section-title">Backup</div>
       <div class="card">
         <div class="hint" style="margin-top:0; margin-bottom:14px;">Alle Daten liegen ausschließlich lokal auf diesem Gerät. Wird die App vom Home-Bildschirm gelöscht, können Reisen, Adressen und Einstellungen unwiederbringlich verloren gehen. Erstelle daher regelmäßig ein Backup und sichere die Datei z. B. in iCloud Drive oder per Mail.</div>
@@ -1449,11 +1611,15 @@
       <div class="section-title">Gespeicherte Kennzeichen</div>
       <div class="card">${vehRows}</div>
 
-      <div class="hint" style="margin-top:18px; padding: 0 4px;">Alle Daten (Reisen, Adressen, Fahrzeuge) liegen ausschließlich lokal in diesem Browser auf diesem Gerät. Es gibt aktuell keinen Abgleich zwischen mehreren Geräten.</div>
+      <div class="hint" style="margin-top:18px; padding: 0 4px;">${currentUser ? 'Deine Daten werden mit deinem Google-Konto synchronisiert und stehen auf all deinen angemeldeten Geräten zur Verfügung.' : 'Alle Daten (Reisen, Adressen, Fahrzeuge) liegen ausschließlich lokal in diesem Browser auf diesem Gerät. Mit Cloud-Synchronisation (oben) stehen sie auch auf deinen anderen Geräten zur Verfügung.'}</div>
     `;
   }
 
   function attachSettingsViewHandlers() {
+    const cloudSignInBtn = document.getElementById('btn-cloud-signin');
+    if (cloudSignInBtn) cloudSignInBtn.addEventListener('click', signInWithGoogle);
+    const cloudSignOutBtn = document.getElementById('btn-cloud-signout');
+    if (cloudSignOutBtn) cloudSignOutBtn.addEventListener('click', signOutCloud);
     document.getElementById('btn-export-backup').addEventListener('click', exportBackup);
     const importInput = document.getElementById('import-backup-input');
     document.getElementById('btn-import-backup').addEventListener('click', () => importInput.click());
@@ -1530,4 +1696,5 @@
 
   render();
   retryAllPending();
+  initCloudAuth();
 })();
