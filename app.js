@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '2.1.0';
+  const APP_VERSION = '2.2.0';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -821,6 +821,14 @@
     });
 
     function finalizeNewLocation(address, labelOverride, verified) {
+      const normalized = address.trim().toLowerCase();
+      const existing = state.locations.find(l => l.address.trim().toLowerCase() === normalized);
+      if (existing) {
+        toast('Adresse bereits gespeichert — wird wiederverwendet');
+        closeSheet();
+        setDraftLocation(role, existing.id);
+        return;
+      }
       const label = (labelOverride || '').trim() || address;
       const loc = { id: uid(), label, address, lat: null, lon: null, usageCount: 0, lastUsedAt: null, verified: !!verified };
       state.locations.push(loc);
@@ -1329,6 +1337,99 @@
     render();
   }
 
+  function mergeLocations(sourceId, targetId) {
+    for (const t of state.trips) {
+      if (t.startLocationId === sourceId) t.startLocationId = targetId;
+      if (t.endLocationId === sourceId) t.endLocationId = targetId;
+    }
+    saveKey('trips');
+    const source = findLocation(sourceId);
+    const target = findLocation(targetId);
+    if (source && target) {
+      target.usageCount = (target.usageCount || 0) + (source.usageCount || 0);
+      if (source.lastUsedAt && (!target.lastUsedAt || source.lastUsedAt > target.lastUsedAt)) {
+        target.lastUsedAt = source.lastUsedAt;
+      }
+    }
+    state.locations = state.locations.filter(l => l.id !== sourceId);
+    saveKey('locations');
+  }
+
+  function openMergeTargetPicker(sourceId) {
+    const source = findLocation(sourceId);
+    if (!source) return;
+    const items = sortedByRecency(state.locations)
+      .filter(l => l.id !== sourceId)
+      .map(l => ({ ...l, __id: l.id }));
+    if (!items.length) { toast('Keine weitere Adresse zum Zusammenführen vorhanden'); return; }
+    openPicker({
+      title: 'Mit welcher Adresse zusammenführen?',
+      searchPlaceholder: 'Adresse suchen',
+      items,
+      matches: (it, q) => (it.label + ' ' + it.address).toLowerCase().includes(q),
+      renderItem: (it) => ({ primary: it.label, secondary: it.label !== it.address ? it.address : '' }),
+      onSelect: async (it) => {
+        closeSheet();
+        const ok = await confirmDialog(`„${source.label}" mit „${it.label}" zusammenführen? Alle Reisen, die „${source.label}" nutzen, werden auf „${it.label}" umgestellt. „${source.label}" wird danach gelöscht.`, 'Zusammenführen');
+        if (!ok) return;
+        mergeLocations(sourceId, it.id);
+        toast('Adressen zusammengeführt');
+        render();
+      }
+    });
+  }
+
+  function openLocationEditor(id) {
+    const loc = findLocation(id);
+    if (!loc) return;
+    closeSheet();
+    const backdrop = document.createElement('div');
+    backdrop.id = 'sheet-backdrop';
+    backdrop.className = 'sheet-backdrop';
+    backdrop.innerHTML = `
+      <div class="sheet" role="dialog">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+          <h2>Adresse bearbeiten</h2>
+          <button class="btn-text" id="sheet-close">Abbrechen</button>
+        </div>
+        <form id="edit-loc-form" style="padding: 4px 18px 20px;">
+          <div class="field">
+            <label for="edit-loc-label">Bezeichnung (optional)</label>
+            <input type="text" id="edit-loc-label" value="${escapeHtml(loc.label === loc.address ? '' : loc.label)}" placeholder="z. B. Büro Zürich" enterkeyhint="next">
+          </div>
+          <div class="field">
+            <label for="edit-loc-address">Adresse</label>
+            <input type="text" id="edit-loc-address" value="${escapeHtml(loc.address)}" enterkeyhint="done">
+          </div>
+          <button type="submit" class="btn-primary" id="edit-loc-save" style="width:100%;">Speichern</button>
+        </form>
+      </div>
+    `;
+    appendSheet(backdrop);
+    backdrop.querySelector('#sheet-close').addEventListener('click', closeSheet);
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeSheet(); });
+    backdrop.querySelector('#edit-loc-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const newAddress = backdrop.querySelector('#edit-loc-address').value.trim();
+      if (!newAddress) { toast('Bitte eine Adresse angeben'); return; }
+      const newLabelInput = backdrop.querySelector('#edit-loc-label').value.trim();
+      loc.label = newLabelInput || newAddress;
+      if (newAddress !== loc.address) {
+        loc.address = newAddress;
+        loc.lat = null;
+        loc.lon = null;
+        loc.resolvedLabel = null;
+        loc.verified = false; // manually edited, no longer confirmed via autocomplete
+      }
+      saveKey('locations');
+      closeSheet();
+      toast('Adresse aktualisiert');
+      render();
+    });
+    setTimeout(() => backdrop.querySelector('#edit-loc-label').focus(), 50);
+  }
+
   async function deleteVehicle(plate) {
     const ok = await confirmDialog('Dieses Kennzeichen löschen?');
     if (!ok) return;
@@ -1542,13 +1643,17 @@
   function renderSettingsView() {
     const locRows = state.locations.length
       ? sortedByRecency(state.locations).map(l => `
-        <div class="manage-row">
+        <div class="manage-row" style="flex-direction:column; align-items:stretch; gap:8px;">
           <div>
             <div>${escapeHtml(l.label)}</div>
             <div class="sub">${escapeHtml(l.address)}</div>
             ${isUnverifiedLocation(l) ? `<div class="sub warn-text">manuell erfasst${l.resolvedLabel ? ' · aufgelöst als: ' + escapeHtml(l.resolvedLabel) : ''}</div>` : ''}
           </div>
-          <button class="btn-danger" data-del-loc="${escapeHtml(l.id)}">Löschen</button>
+          <div style="display:flex; gap:16px;">
+            <button class="btn-text" data-edit-loc="${escapeHtml(l.id)}">Bearbeiten</button>
+            <button class="btn-text" data-merge-loc="${escapeHtml(l.id)}">Zusammenführen</button>
+            <button class="btn-danger" data-del-loc="${escapeHtml(l.id)}">Löschen</button>
+          </div>
         </div>`).join('')
       : `<div class="hint">Noch keine Adressen gespeichert.</div>`;
 
@@ -1638,6 +1743,12 @@
     document.getElementById('btn-save-key').addEventListener('click', saveApiKey);
     document.querySelectorAll('[data-del-loc]').forEach(btn => {
       btn.addEventListener('click', () => deleteLocation(btn.getAttribute('data-del-loc')));
+    });
+    document.querySelectorAll('[data-edit-loc]').forEach(btn => {
+      btn.addEventListener('click', () => openLocationEditor(btn.getAttribute('data-edit-loc')));
+    });
+    document.querySelectorAll('[data-merge-loc]').forEach(btn => {
+      btn.addEventListener('click', () => openMergeTargetPicker(btn.getAttribute('data-merge-loc')));
     });
     document.querySelectorAll('[data-del-veh]').forEach(btn => {
       btn.addEventListener('click', () => deleteVehicle(btn.getAttribute('data-del-veh')));
