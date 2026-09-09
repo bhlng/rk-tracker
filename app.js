@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '2.0.4';
+  const APP_VERSION = '2.0.5';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -45,13 +45,15 @@
   let draft = makeEmptyDraft();
 
   function makeEmptyDraft() {
+    const now = new Date();
+    now.setMinutes(Math.floor(now.getMinutes() / 5) * 5, 0, 0); // matches the 5-minute time picker steps
     const d = {
       startLocationId: null,
       endLocationId: null,
       distanceKm: null,
       distanceStatus: 'empty', // empty | pending | ok
       distanceError: null,
-      startDateTime: toDatetimeLocalValue(new Date()),
+      startDateTime: toDatetimeLocalValue(now),
       endDateTime: '',
       vehiclePlate: '',
       note: '',
@@ -1012,9 +1014,9 @@
     const current = role === 'start' ? draft.startDateTime : draft.endDateTime;
     const { time } = splitDateTime(current);
     const [curH, curMRaw] = time ? time.split(':') : ['', ''];
-    // Round to the nearest 5-minute mark for display, in case the stored value (e.g. from an
-    // older entry) isn't already on one - avoids silently snapping to 00 if left untouched.
-    const curM = curMRaw ? pad(Math.round(Number(curMRaw) / 5) * 5 % 60) : '';
+    // Round down to the 5-minute mark for display, in case the stored value (e.g. from an
+    // older entry) isn't already on one - avoids silently snapping to a later time if left untouched.
+    const curM = curMRaw ? pad(Math.floor(Number(curMRaw) / 5) * 5) : '';
     const hourOptions = Array.from({ length: 24 }, (_, i) => pad(i));
     const minuteOptions = Array.from({ length: 12 }, (_, i) => pad(i * 5));
     const backdrop = document.createElement('div');
