@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '2.0.3';
+  const APP_VERSION = '2.0.4';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -1011,9 +1011,12 @@
     closeSheet();
     const current = role === 'start' ? draft.startDateTime : draft.endDateTime;
     const { time } = splitDateTime(current);
-    const [curH, curM] = time ? time.split(':') : ['', ''];
+    const [curH, curMRaw] = time ? time.split(':') : ['', ''];
+    // Round to the nearest 5-minute mark for display, in case the stored value (e.g. from an
+    // older entry) isn't already on one - avoids silently snapping to 00 if left untouched.
+    const curM = curMRaw ? pad(Math.round(Number(curMRaw) / 5) * 5 % 60) : '';
     const hourOptions = Array.from({ length: 24 }, (_, i) => pad(i));
-    const minuteOptions = Array.from({ length: 60 }, (_, i) => pad(i));
+    const minuteOptions = Array.from({ length: 12 }, (_, i) => pad(i * 5));
     const backdrop = document.createElement('div');
     backdrop.id = 'sheet-backdrop';
     backdrop.className = 'sheet-backdrop';
