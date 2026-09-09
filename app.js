@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '2.0.5';
+  const APP_VERSION = '2.1.0';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -1435,7 +1435,7 @@
         </div>
       </div>
       <button class="btn-primary" id="btn-save-trip">${editingTripId ? 'Änderungen speichern' : 'Reise speichern'}</button>
-      ${editingTripId ? '<button class="btn-secondary" id="btn-cancel-edit" style="width:100%;margin-top:10px;">Abbrechen</button>' : ''}
+      <button class="btn-secondary" id="btn-cancel-edit" style="width:100%;margin-top:10px;">Abbrechen</button>
     `;
   }
 
