@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '2.4.0';
+  const APP_VERSION = '2.4.1';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -1614,7 +1614,10 @@
         </div>
         <div class="field">
           <label>Notiz (optional)</label>
-          <textarea id="input-note" maxlength="1000" placeholder="z. B. Anlass der Reise">${escapeHtml(draft.note)}</textarea>
+          <div class="text-input-wrap textarea-wrap">
+            <textarea id="input-note" maxlength="1000" placeholder="z. B. Anlass der Reise">${escapeHtml(draft.note)}</textarea>
+            <button type="button" class="input-clear" data-clear-target="input-note" aria-label="Eingabe löschen">×</button>
+          </div>
           <div class="char-count"><span id="note-count">${draft.note.length}</span> / 1000</div>
         </div>
       </div>

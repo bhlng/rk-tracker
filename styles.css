@@ -539,6 +539,15 @@ button {
   padding-right: 38px;
 }
 
+.textarea-wrap textarea {
+  padding-right: 38px;
+}
+
+.textarea-wrap .input-clear {
+  top: 12px;
+  transform: none;
+}
+
 .input-clear {
   display: none;
   position: absolute;
@@ -560,7 +569,8 @@ button {
 
 .input-clear:active { background: var(--bg-elevated-2); }
 
-input:not(:placeholder-shown) ~ .input-clear {
+input:not(:placeholder-shown) ~ .input-clear,
+textarea:not(:placeholder-shown) ~ .input-clear {
   display: flex;
 }
 
