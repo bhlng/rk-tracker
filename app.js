@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '2.3.3';
+  const APP_VERSION = '2.4.0';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -710,7 +710,10 @@
           <button class="btn-text" id="sheet-close">Fertig</button>
         </div>
         <div class="sheet-search">
-          <input type="text" id="sheet-search-input" placeholder="${escapeHtml(searchPlaceholder)}" autocomplete="off" autocapitalize="words" enterkeyhint="done">
+          <div class="text-input-wrap">
+            <input type="text" id="sheet-search-input" placeholder="${escapeHtml(searchPlaceholder)}" autocomplete="off" autocapitalize="words" enterkeyhint="done">
+            <button type="button" class="input-clear" data-clear-target="sheet-search-input" aria-label="Eingabe löschen">×</button>
+          </div>
         </div>
         <div class="sheet-list" id="sheet-list"></div>
       </div>
@@ -724,10 +727,6 @@
       const q = searchEl.value.trim().toLowerCase();
       const filtered = q ? items.filter(it => matches(it, q)) : items;
       let html = '';
-      const exact = q && items.some(it => matches(it, q) && matches.exact && matches.exact(it, q));
-      if (q && onCreate) {
-        html += `<button class="sheet-item new-item" data-action="create">+ „${escapeHtml(searchEl.value.trim())}" hinzufügen</button>`;
-      }
       if (!filtered.length && !q) {
         html += `<div class="sheet-empty">Noch nichts gespeichert. Tippe oben, um Neues anzulegen.</div>`;
       }
@@ -746,18 +745,14 @@
           if (item) onSelect(item);
         });
       });
-      const createBtn = listEl.querySelector('.sheet-item[data-action="create"]');
-      if (createBtn) {
-        createBtn.addEventListener('click', () => onCreate(searchEl.value.trim()));
-      }
     }
 
-    searchEl.addEventListener('input', renderList);
-    searchEl.addEventListener('keydown', (e) => {
-      if (e.key !== 'Enter') return;
-      e.preventDefault();
+    // Shared by Enter and the "Fertig" button: pick the one matching saved
+    // item, or hand the typed text to onCreate (which itself decides
+    // whether to reuse an existing record or create a new one).
+    function submitQuery() {
       const q = searchEl.value.trim();
-      if (!q) return;
+      if (!q) { closeSheet(); return; }
       const qLower = q.toLowerCase();
       const filtered = items.filter(it => matches(it, qLower));
       if (filtered.length === 1) {
@@ -765,8 +760,18 @@
       } else if (onCreate) {
         onCreate(q);
       }
+    }
+
+    searchEl.addEventListener('input', renderList);
+    searchEl.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      submitQuery();
     });
-    backdrop.querySelector('#sheet-close').addEventListener('click', closeSheet);
+    backdrop.querySelector('#sheet-close').addEventListener('click', () => {
+      if (onCreate && searchEl.value.trim()) submitQuery();
+      else closeSheet();
+    });
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeSheet(); });
 
     renderList();
@@ -796,16 +801,25 @@
           <span class="chip"><span id="addr-chip-label"></span><button type="button" id="addr-chip-clear" aria-label="Ort ändern">×</button></span>
         </div>
         <div class="sheet-search">
-          <input type="text" id="addr-search-input" placeholder="Ort eingeben" autocomplete="off" autocapitalize="words" enterkeyhint="search">
+          <div class="text-input-wrap">
+            <input type="text" id="addr-search-input" placeholder="Ort eingeben" autocomplete="off" autocapitalize="words" enterkeyhint="search">
+            <button type="button" class="input-clear" data-clear-target="addr-search-input" aria-label="Eingabe löschen">×</button>
+          </div>
         </div>
         <div class="sheet-list" id="addr-results"></div>
         <div id="addr-confirm-row" style="padding: 4px 18px 4px;" hidden>
           <div class="field">
-            <input type="text" id="addr-housenumber-input" placeholder="Hausnummer (optional)" inputmode="numeric" enterkeyhint="done">
+            <div class="text-input-wrap">
+              <input type="text" id="addr-housenumber-input" placeholder="Hausnummer (optional)" inputmode="numeric" enterkeyhint="done">
+              <button type="button" class="input-clear" data-clear-target="addr-housenumber-input" aria-label="Eingabe löschen">×</button>
+            </div>
           </div>
           <button type="button" class="btn-text" id="addr-label-toggle">+ Bezeichnung hinzufügen</button>
           <div class="field" id="addr-label-field" hidden>
-            <input type="text" id="addr-label-input" placeholder="z. B. Büro Zürich" enterkeyhint="done">
+            <div class="text-input-wrap">
+              <input type="text" id="addr-label-input" placeholder="z. B. Büro Zürich" enterkeyhint="done">
+              <button type="button" class="input-clear" data-clear-target="addr-label-input" aria-label="Eingabe löschen">×</button>
+            </div>
           </div>
           <button type="button" class="btn-primary" id="addr-confirm-btn" style="width:100%; margin-top:10px;">Übernehmen</button>
         </div>
@@ -1117,7 +1131,7 @@
         <form id="rate-form" style="padding: 4px 18px 20px;">
           <div class="field">
             <label for="rate-amount-input">Betrag pro Kilometer</label>
-            <div class="input-suffix"><input type="text" inputmode="decimal" id="rate-amount-input" placeholder="0,40" value="${escapeHtml(currentVal)}" enterkeyhint="done"><span class="suffix">€/km</span></div>
+            <div class="input-suffix has-clear"><input type="text" inputmode="decimal" id="rate-amount-input" placeholder="0,40" value="${escapeHtml(currentVal)}" enterkeyhint="done"><button type="button" class="input-clear" data-clear-target="rate-amount-input" aria-label="Eingabe löschen">×</button><span class="suffix">€/km</span></div>
           </div>
           <button type="submit" class="btn-primary" id="rate-save">Speichern</button>
           ${draft.rateSource === 'manual' ? '<button type="button" class="btn-secondary" id="rate-reset" style="width:100%;margin-top:10px;">Automatisch verwenden</button>' : ''}
@@ -1459,11 +1473,17 @@
         <form id="edit-loc-form" style="padding: 4px 18px 20px;">
           <div class="field">
             <label for="edit-loc-label">Bezeichnung (optional)</label>
-            <input type="text" id="edit-loc-label" value="${escapeHtml(loc.label === loc.address ? '' : loc.label)}" placeholder="z. B. Büro Zürich" enterkeyhint="next">
+            <div class="text-input-wrap">
+              <input type="text" id="edit-loc-label" value="${escapeHtml(loc.label === loc.address ? '' : loc.label)}" placeholder="z. B. Büro Zürich" enterkeyhint="next">
+              <button type="button" class="input-clear" data-clear-target="edit-loc-label" aria-label="Eingabe löschen">×</button>
+            </div>
           </div>
           <div class="field">
             <label for="edit-loc-address">Adresse</label>
-            <input type="text" id="edit-loc-address" value="${escapeHtml(loc.address)}" enterkeyhint="done">
+            <div class="text-input-wrap">
+              <input type="text" id="edit-loc-address" value="${escapeHtml(loc.address)}" placeholder="Straße, PLZ Ort" enterkeyhint="done">
+              <button type="button" class="input-clear" data-clear-target="edit-loc-address" aria-label="Eingabe löschen">×</button>
+            </div>
           </div>
           <button type="submit" class="btn-primary" id="edit-loc-save" style="width:100%;">Speichern</button>
         </form>
@@ -1774,7 +1794,10 @@
       <div class="card">
         <div class="field">
           <label for="ors-key-input">OpenRouteService API-Key</label>
-          <input type="password" id="ors-key-input" placeholder="API-Key einfügen" value="${escapeHtml(state.settings.orsApiKey)}" autocomplete="off">
+          <div class="text-input-wrap">
+            <input type="password" id="ors-key-input" placeholder="API-Key einfügen" value="${escapeHtml(state.settings.orsApiKey)}" autocomplete="off">
+            <button type="button" class="input-clear" data-clear-target="ors-key-input" aria-label="Eingabe löschen">×</button>
+          </div>
           <div class="hint">Wird nur auf diesem Gerät gespeichert (lokal im Browser) und ausschließlich für die Distanzberechnung genutzt. Kostenlosen Key auf openrouteservice.org erstellen.</div>
         </div>
         <button class="btn-secondary" id="btn-save-key">Speichern</button>
@@ -1852,6 +1875,19 @@
       currentView = btn.getAttribute('data-view');
       render();
     });
+  });
+
+  // ---------- Clearable text fields ----------
+  // Delegated on document so it works for every current and future sheet
+  // without each one needing its own listener wiring.
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.input-clear');
+    if (!btn) return;
+    const input = document.getElementById(btn.getAttribute('data-clear-target'));
+    if (!input) return;
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.focus();
   });
 
   // ---------- Service worker ----------

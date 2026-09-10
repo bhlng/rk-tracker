@@ -511,6 +511,10 @@ button {
   padding-right: 48px;
 }
 
+.input-suffix.has-clear input {
+  padding-right: 78px;
+}
+
 .input-suffix .suffix {
   position: absolute;
   right: 14px;
@@ -519,6 +523,45 @@ button {
   color: var(--text-faint);
   font-size: 14px;
   pointer-events: none;
+}
+
+.input-suffix .input-clear {
+  right: 44px;
+}
+
+/* ---- Clearable text fields ---- */
+
+.text-input-wrap {
+  position: relative;
+}
+
+.text-input-wrap input {
+  padding-right: 38px;
+}
+
+.input-clear {
+  display: none;
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 26px;
+  height: 26px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: var(--bg-elevated);
+  border: none;
+  border-radius: 50%;
+  color: var(--text-faint);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.input-clear:active { background: var(--bg-elevated-2); }
+
+input:not(:placeholder-shown) ~ .input-clear {
+  display: flex;
 }
 
 .warn-text {
