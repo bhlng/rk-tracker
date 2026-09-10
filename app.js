@@ -1,10 +1,11 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.2.1';
+  const APP_VERSION = '3.3.0';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
+  const IMMO_NOTE_SUGGESTIONS = ['Wohnungsübergabe', 'Wohnungsbesichtigung', 'Ankaufs-Besichtigung'];
 
   const DEFAULTS = {
     trips: [],
@@ -125,6 +126,26 @@
     const d = new Date(value);
     if (isNaN(d)) return value;
     return d.toLocaleString('de-CH', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
+  // Pure display helper — Tage/Std/Min zwischen Start und Rückkehr, '' wenn
+  // eine Zeit fehlt oder die Rückkehr nicht nach dem Start liegt.
+  function formatDuration(startIso, endIso) {
+    if (!startIso || !endIso) return '';
+    const start = new Date(startIso);
+    const end = new Date(endIso);
+    if (isNaN(start) || isNaN(end)) return '';
+    let mins = Math.round((end - start) / 60000);
+    if (mins <= 0) return '';
+    const days = Math.floor(mins / 1440);
+    mins -= days * 1440;
+    const hours = Math.floor(mins / 60);
+    mins -= hours * 60;
+    const parts = [];
+    if (days) parts.push(`${days} Tag${days === 1 ? '' : 'e'}`);
+    if (hours) parts.push(`${hours} Std`);
+    if (mins || !parts.length) parts.push(`${mins} Min`);
+    return parts.join(' ');
   }
 
   function formatEuro(amount) {
@@ -1774,13 +1795,18 @@
           </button>
         </div>` : ''}
         <div class="field">
-          <label>Notiz (optional)</label>
+          <label>${currentContext === 'immobilien' ? 'Anlass (optional)' : 'Notiz (optional)'}</label>
+          ${currentContext === 'immobilien' ? `
+          <div class="chip-row">
+            ${IMMO_NOTE_SUGGESTIONS.map(s => `<button type="button" class="chip-suggestion" data-note-suggestion="${escapeHtml(s)}">${escapeHtml(s)}</button>`).join('')}
+          </div>` : ''}
           <div class="text-input-wrap textarea-wrap">
             <textarea id="input-note" maxlength="1000" placeholder="z. B. Anlass der Reise">${escapeHtml(draft.note)}</textarea>
             <button type="button" class="input-clear" data-clear-target="input-note" aria-label="Eingabe löschen">×</button>
           </div>
           <div class="char-count"><span id="note-count">${draft.note.length}</span> / 1000</div>
         </div>
+        ${formatDuration(draft.startDateTime, draft.endDateTime) ? `<div class="hint" style="padding:0 4px;">Dauer: ${escapeHtml(formatDuration(draft.startDateTime, draft.endDateTime))}</div>` : ''}
       </div>
       <button class="btn-primary" id="btn-save-trip">${editingTripId ? 'Änderungen speichern' : 'Reise speichern'}</button>
       <button class="btn-secondary" id="btn-cancel-edit" style="width:100%;margin-top:10px;">Abbrechen</button>
@@ -1819,6 +1845,14 @@
     noteEl.addEventListener('input', (e) => {
       draft.note = e.target.value;
       document.getElementById('note-count').textContent = draft.note.length;
+    });
+    document.querySelectorAll('[data-note-suggestion]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        draft.note = btn.getAttribute('data-note-suggestion');
+        noteEl.value = draft.note;
+        document.getElementById('note-count').textContent = draft.note.length;
+        noteEl.focus();
+      });
     });
 
     const retryBtn = document.querySelector('[data-action="retry-draft"]');
@@ -1862,7 +1896,7 @@
               <span class="trip-route">${locationLabelHtml(trip.startLocationId)} → ${locationLabelHtml(trip.endLocationId)}</span>
               <span class="trip-km">${distText}</span>
             </div>
-            <div class="trip-meta">${formatDateTime(trip.startDateTime)}${trip.endDateTime ? ' – ' + formatDateTime(trip.endDateTime) : ' · <span class="warn-text">keine Rückkehrzeit</span>'}</div>
+            <div class="trip-meta">${formatDateTime(trip.startDateTime)}${trip.endDateTime ? ' – ' + formatDateTime(trip.endDateTime) : ' · <span class="warn-text">keine Rückkehrzeit</span>'}${formatDuration(trip.startDateTime, trip.endDateTime) ? ' · ' + escapeHtml(formatDuration(trip.startDateTime, trip.endDateTime)) : ''}</div>
             ${trip.context === 'immobilien' && trip.objektKuerzel ? `<div class="trip-meta">Objekt: ${escapeHtml(trip.objektKuerzel)}</div>` : ''}
             <div class="trip-meta">${escapeHtml(trip.vehiclePlate)}${trip.ratePerKm != null ? ' · ' + formatEuroPerKm(trip.ratePerKm) : ''}</div>
             ${trip.note ? `<div class="trip-note">${escapeHtml(trip.note)}</div>` : ''}

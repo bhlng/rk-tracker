@@ -338,6 +338,26 @@ button {
   line-height: 1;
 }
 
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.chip-suggestion {
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 7px 12px;
+  border-radius: 999px;
+}
+
+.chip-suggestion:active { background: var(--bg-elevated); }
+
 .picker-trigger {
   width: 100%;
   text-align: left;
