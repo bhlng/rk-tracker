@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.0.1';
+  const APP_VERSION = '3.1.0';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -12,7 +12,7 @@
     vehicles: [],
     routeCache: {},
     rates: [],
-    settings: { orsApiKey: '' }
+    settings: { orsApiKey: '', homeLocationId: null, workLocationId: null }
   };
 
   function loadKey(key) {
@@ -54,12 +54,16 @@
   function makeEmptyDraft() {
     const now = new Date();
     now.setMinutes(Math.floor(now.getMinutes() / 5) * 5, 0, 0); // matches the 5-minute time picker steps
+    // Pendeln only: prefill Start/Ziel from the "Zuhause"/"Arbeit" defaults
+    // in den Einstellungen, if set and the referenced address still exists.
+    const homeLoc = currentContext === 'pendeln' && state.settings.homeLocationId ? findLocation(state.settings.homeLocationId) : null;
+    const workLoc = currentContext === 'pendeln' && state.settings.workLocationId ? findLocation(state.settings.workLocationId) : null;
     const d = {
       context: currentContext,
-      startLocationId: null,
-      endLocationId: null,
+      startLocationId: homeLoc ? homeLoc.id : null,
+      endLocationId: workLoc ? workLoc.id : null,
       distanceKm: null,
-      distanceStatus: 'empty', // empty | pending | ok
+      distanceStatus: (homeLoc && workLoc) ? 'pending' : 'empty', // empty | pending | ok
       distanceError: null,
       startDateTime: toDatetimeLocalValue(now),
       endDateTime: '',
@@ -70,6 +74,9 @@
       cost: null
     };
     computeCost(d);
+    if (homeLoc && workLoc) {
+      calcDistance(d).then(() => { if (d === draft) render(); });
+    }
     return d;
   }
 
@@ -556,6 +563,23 @@
     render();
   }
 
+  // Dispatches an address chosen in openAddressSearch to wherever it belongs:
+  // the in-progress trip draft ('start'/'end'), or a Settings-level default
+  // ('settings-home'/'settings-work'), which just needs to be saved & re-rendered.
+  function resolveLocationForRole(role, locId) {
+    if (role === 'settings-home') {
+      state.settings.homeLocationId = locId;
+      saveKey('settings');
+      render();
+    } else if (role === 'settings-work') {
+      state.settings.workLocationId = locId;
+      saveKey('settings');
+      render();
+    } else {
+      setDraftLocation(role, locId);
+    }
+  }
+
   async function retryDraftDistance() {
     if (!(draft.startLocationId && draft.endLocationId)) return;
     const p = calcDistance(draft);
@@ -855,7 +879,7 @@
       <div class="sheet" role="dialog">
         <div class="sheet-handle"></div>
         <div class="sheet-header">
-          <h2>${role === 'start' ? 'Startort wählen' : 'Ziel wählen'}</h2>
+          <h2>${{ start: 'Startort wählen', end: 'Ziel wählen', 'settings-home': 'Zuhause festlegen', 'settings-work': 'Arbeitsort festlegen' }[role] || 'Ort wählen'}</h2>
           <button class="btn-text" id="sheet-close">Abbrechen</button>
         </div>
         <div id="addr-chip-row" class="sheet-search" hidden>
@@ -932,7 +956,7 @@
       if (existing) {
         toast('Adresse bereits gespeichert — wird wiederverwendet');
         closeSheet();
-        setDraftLocation(role, existing.id);
+        resolveLocationForRole(role, existing.id);
         return;
       }
       const label = (labelOverride || '').trim() || address;
@@ -940,7 +964,7 @@
       state.locations.push(loc);
       saveKey('locations');
       closeSheet();
-      setDraftLocation(role, loc.id);
+      resolveLocationForRole(role, loc.id);
     }
 
     labelToggle.addEventListener('click', () => {
@@ -969,7 +993,7 @@
       resultsEl.querySelectorAll('[data-saved]').forEach(btn => {
         btn.addEventListener('click', () => {
           const loc = state.locations.find(l => l.id === btn.getAttribute('data-saved'));
-          if (loc) { closeSheet(); setDraftLocation(role, loc.id); }
+          if (loc) { closeSheet(); resolveLocationForRole(role, loc.id); }
         });
       });
       resultsEl.querySelectorAll('[data-place]').forEach(btn => {
@@ -1824,6 +1848,9 @@
         </div>`).join('')
       : `<div class="hint">Noch keine Pendlerpauschale hinterlegt. Ohne Satz werden keine Kosten berechnet.</div>`;
 
+    const homeLoc = state.settings.homeLocationId ? findLocation(state.settings.homeLocationId) : null;
+    const workLoc = state.settings.workLocationId ? findLocation(state.settings.workLocationId) : null;
+
     return `
       <div class="section-title">Cloud-Synchronisation</div>
       <div class="card">
@@ -1857,6 +1884,31 @@
           <div class="hint">Betrag in Euro pro Kilometer, gültig ab dem gewählten Datum. Bei rückwirkenden Änderungen fragen wir nach, ob bereits erfasste Fahrten angepasst werden sollen.</div>
         </div>
         <button class="btn-secondary" id="btn-add-rate">Satz speichern</button>
+      </div>
+
+      <div class="section-title">Pendeln-Adressen</div>
+      <div class="card">
+        <div class="field">
+          <label>Zuhause (optional)</label>
+          <div class="trigger-row">
+            <button class="picker-trigger" id="btn-pick-home">
+              <span class="${homeLoc ? '' : 'placeholder'}">${homeLoc ? escapeHtml(homeLoc.label) : 'Nicht festgelegt'}</span>
+              <span class="chev">›</span>
+            </button>
+            ${homeLoc ? `<button type="button" class="icon-btn" id="btn-clear-home" aria-label="Zuhause entfernen">×</button>` : ''}
+          </div>
+        </div>
+        <div class="field">
+          <label>Arbeit (optional)</label>
+          <div class="trigger-row">
+            <button class="picker-trigger" id="btn-pick-work">
+              <span class="${workLoc ? '' : 'placeholder'}">${workLoc ? escapeHtml(workLoc.label) : 'Nicht festgelegt'}</span>
+              <span class="chev">›</span>
+            </button>
+            ${workLoc ? `<button type="button" class="icon-btn" id="btn-clear-work" aria-label="Arbeit entfernen">×</button>` : ''}
+          </div>
+        </div>
+        <div class="hint">Werden beim Anlegen einer neuen Pendeln-Reise automatisch als Start bzw. Ziel vorgeschlagen — bleiben pro Reise änderbar.</div>
       </div>` : ''}
 
       <div class="section-title">Routing</div>
@@ -1913,6 +1965,14 @@
     document.querySelectorAll('[data-del-rate]').forEach(btn => {
       btn.addEventListener('click', () => deleteRate(btn.getAttribute('data-del-rate')));
     });
+    const pickHomeBtn = document.getElementById('btn-pick-home');
+    if (pickHomeBtn) pickHomeBtn.addEventListener('click', () => openAddressSearch('settings-home'));
+    const pickWorkBtn = document.getElementById('btn-pick-work');
+    if (pickWorkBtn) pickWorkBtn.addEventListener('click', () => openAddressSearch('settings-work'));
+    const clearHomeBtn = document.getElementById('btn-clear-home');
+    if (clearHomeBtn) clearHomeBtn.addEventListener('click', () => { state.settings.homeLocationId = null; saveKey('settings'); render(); });
+    const clearWorkBtn = document.getElementById('btn-clear-work');
+    if (clearWorkBtn) clearWorkBtn.addEventListener('click', () => { state.settings.workLocationId = null; saveKey('settings'); render(); });
   }
 
   // ---------- Router / render ----------

@@ -17,21 +17,19 @@
   --radius-sm: 8px;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
-  --topbar-bg: rgba(18, 20, 27, 0.92);
-  --tabbar-bg: rgba(26, 29, 39, 0.94);
   color-scheme: dark;
 }
 
+/* Immobilien: only the page background gets a subtle green tint; cards,
+   inputs, and the top/bottom chrome bars stay the same neutral gray as
+   Pendeln (native date-input chrome can't be tinted anyway, so tinting
+   every surface just looked inconsistent against it). --accent etc. still
+   switch, so buttons and active states are green. */
 body[data-context="immobilien"] {
   --accent: #4caf6e;
   --accent-dim: #2f7a48;
   --accent-text: #06180d;
-  --bg: #101612;
-  --bg-elevated: #171f1a;
-  --bg-elevated-2: #202b23;
-  --border: #2a352e;
-  --topbar-bg: rgba(16, 22, 18, 0.92);
-  --tabbar-bg: rgba(23, 31, 26, 0.94);
+  --bg: #10160f;
 }
 
 * { box-sizing: border-box; }
@@ -60,10 +58,9 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: calc(14px + var(--safe-top)) 20px 14px;
-  background: var(--topbar-bg);
+  background: rgba(18, 20, 27, 0.92);
   backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--border);
-  transition: background-color .3s ease, border-color .3s ease;
 }
 
 .topbar h1 {
@@ -142,12 +139,11 @@ main {
   left: 0;
   right: 0;
   display: flex;
-  background: var(--tabbar-bg);
+  background: rgba(26, 29, 39, 0.94);
   backdrop-filter: blur(14px);
   border-top: 1px solid var(--border);
   padding: 8px 12px calc(8px + var(--safe-bottom));
   z-index: 20;
-  transition: background-color .3s ease, border-color .3s ease;
 }
 
 .tab-btn {
