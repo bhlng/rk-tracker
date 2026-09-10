@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '2.2.0';
+  const APP_VERSION = '2.3.0';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -536,6 +536,37 @@
       backdrop.querySelector('#confirm-cancel').addEventListener('click', () => cleanup(false));
       backdrop.querySelector('#confirm-ok').addEventListener('click', () => cleanup(true));
       backdrop.addEventListener('click', (e) => { if (e.target === backdrop) cleanup(false); });
+    });
+  }
+
+  // Small dialog offering two labels to pick between (used when merging two
+  // addresses that both have a custom Bezeichnung). Resolves 'a', 'b', or
+  // null if cancelled.
+  function chooseLabelDialog(labelA, labelB) {
+    return new Promise((resolve) => {
+      closeSheet();
+      const backdrop = document.createElement('div');
+      backdrop.id = 'sheet-backdrop';
+      backdrop.className = 'sheet-backdrop';
+      backdrop.innerHTML = `
+        <div class="sheet" role="dialog">
+          <div class="sheet-handle"></div>
+          <div class="sheet-header">
+            <h2>Welche Bezeichnung behalten?</h2>
+          </div>
+          <div style="padding: 0 20px 20px; display:flex; flex-direction:column; gap:10px;">
+            <button class="btn-secondary" id="label-choice-a" style="width:100%;">${escapeHtml(labelA)}</button>
+            <button class="btn-secondary" id="label-choice-b" style="width:100%;">${escapeHtml(labelB)}</button>
+            <button class="btn-text" id="label-choice-cancel" style="width:100%;">Abbrechen</button>
+          </div>
+        </div>
+      `;
+      appendSheet(backdrop);
+      const cleanup = (result) => { closeSheet(); resolve(result); };
+      backdrop.querySelector('#label-choice-a').addEventListener('click', () => cleanup('a'));
+      backdrop.querySelector('#label-choice-b').addEventListener('click', () => cleanup('b'));
+      backdrop.querySelector('#label-choice-cancel').addEventListener('click', () => cleanup(null));
+      backdrop.addEventListener('click', (e) => { if (e.target === backdrop) cleanup(null); });
     });
   }
 
@@ -1337,7 +1368,11 @@
     render();
   }
 
-  function mergeLocations(sourceId, targetId) {
+  function hasCustomLabel(loc) {
+    return !!(loc && loc.label && loc.label !== loc.address);
+  }
+
+  function mergeLocations(sourceId, targetId, finalLabel) {
     for (const t of state.trips) {
       if (t.startLocationId === sourceId) t.startLocationId = targetId;
       if (t.endLocationId === sourceId) t.endLocationId = targetId;
@@ -1349,6 +1384,9 @@
       target.usageCount = (target.usageCount || 0) + (source.usageCount || 0);
       if (source.lastUsedAt && (!target.lastUsedAt || source.lastUsedAt > target.lastUsedAt)) {
         target.lastUsedAt = source.lastUsedAt;
+      }
+      if (finalLabel !== undefined) {
+        target.label = finalLabel;
       }
     }
     state.locations = state.locations.filter(l => l.id !== sourceId);
@@ -1370,9 +1408,22 @@
       renderItem: (it) => ({ primary: it.label, secondary: it.label !== it.address ? it.address : '' }),
       onSelect: async (it) => {
         closeSheet();
-        const ok = await confirmDialog(`„${source.label}" mit „${it.label}" zusammenführen? Alle Reisen, die „${source.label}" nutzen, werden auf „${it.label}" umgestellt. „${source.label}" wird danach gelöscht.`, 'Zusammenführen');
+        const target = findLocation(it.id);
+        if (!target) return;
+        const sourceLabeled = hasCustomLabel(source);
+        const targetLabeled = hasCustomLabel(target);
+        let finalLabel; // undefined = keep target's current label
+        if (sourceLabeled && !targetLabeled) {
+          finalLabel = source.label;
+        } else if (sourceLabeled && targetLabeled && source.label !== target.label) {
+          const choice = await chooseLabelDialog(source.label, target.label);
+          if (!choice) return;
+          finalLabel = choice === 'a' ? source.label : target.label;
+        }
+        const resultLabel = finalLabel !== undefined ? finalLabel : target.label;
+        const ok = await confirmDialog(`„${source.label}" mit „${target.label}" zusammenführen? Alle Reisen, die „${source.label}" nutzen, werden auf „${resultLabel}" umgestellt. „${source.label}" wird danach gelöscht.`, 'Zusammenführen');
         if (!ok) return;
-        mergeLocations(sourceId, it.id);
+        mergeLocations(sourceId, target.id, finalLabel);
         toast('Adressen zusammengeführt');
         render();
       }
