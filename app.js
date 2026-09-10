@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '2.5.1';
+  const APP_VERSION = '3.0.0';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -40,7 +40,13 @@
     settings: loadKey('settings')
   };
 
+  function loadContext() {
+    try { return localStorage.getItem(STORAGE_PREFIX + 'currentContext') || 'pendeln'; }
+    catch (e) { return 'pendeln'; }
+  }
+
   let currentView = 'new';
+  let currentContext = loadContext(); // 'pendeln' | 'immobilien' — persisted locally, unlike currentView
   let editingTripId = null;
   let draft = makeEmptyDraft();
 
@@ -48,6 +54,7 @@
     const now = new Date();
     now.setMinutes(Math.floor(now.getMinutes() / 5) * 5, 0, 0); // matches the 5-minute time picker steps
     const d = {
+      context: currentContext,
       startLocationId: null,
       endLocationId: null,
       distanceKm: null,
@@ -63,6 +70,23 @@
     };
     computeCost(d);
     return d;
+  }
+
+  function setContext(ctx) {
+    if (ctx === currentContext) return;
+    const proceed = () => {
+      currentContext = ctx;
+      try { localStorage.setItem(STORAGE_PREFIX + 'currentContext', ctx); } catch (e) { /* localStorage unavailable */ }
+      document.body.dataset.context = ctx;
+      editingTripId = null;
+      draft = makeEmptyDraft();
+      render();
+    };
+    if (editingTripId) {
+      confirmDialog('Bearbeitung abbrechen? Ungespeicherte Änderungen gehen verloren.', 'Verwerfen').then((ok) => { if (ok) proceed(); });
+    } else {
+      proceed();
+    }
   }
 
   function uid() {
@@ -635,6 +659,7 @@
     } else {
       const trip = {
         id: uid(),
+        context: draft.context || currentContext,
         startLocationId: draft.startLocationId,
         endLocationId: draft.endLocationId,
         distanceKm: draft.distanceKm,
@@ -671,6 +696,7 @@
     if (!trip) return;
     editingTripId = id;
     draft = {
+      context: trip.context || 'pendeln',
       startLocationId: trip.startLocationId,
       endLocationId: trip.endLocationId,
       distanceKm: trip.distanceKm,
@@ -1684,10 +1710,12 @@
   }
 
   function renderTripsView() {
-    if (!state.trips.length) {
-      return `<div class="empty-state">Noch keine Reisen erfasst.<br>Nutze „Neu", um deine erste Reise einzutragen.</div>`;
+    const tripsInContext = state.trips.filter(t => (t.context || 'pendeln') === currentContext);
+    if (!tripsInContext.length) {
+      const label = currentContext === 'immobilien' ? 'Immobilien-Reisen' : 'Reisen';
+      return `<div class="empty-state">Noch keine ${escapeHtml(label)} erfasst.<br>Nutze „Neu", um deine erste Reise einzutragen.</div>`;
     }
-    const sorted = [...state.trips].sort((a, b) => (b.startDateTime || '').localeCompare(a.startDateTime || ''));
+    const sorted = [...tripsInContext].sort((a, b) => (b.startDateTime || '').localeCompare(a.startDateTime || ''));
     let html = '';
 
     // Group by year first so each year's header can show its total.
@@ -1875,6 +1903,9 @@
     document.querySelectorAll('.tab-btn').forEach(btn => {
       btn.classList.toggle('active', btn.getAttribute('data-view') === currentView);
     });
+    document.querySelectorAll('.context-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.getAttribute('data-context') === currentContext);
+    });
     const root = document.getElementById('view-root');
     if (currentView === 'new') {
       root.innerHTML = renderNewView();
@@ -1902,6 +1933,10 @@
     });
   });
 
+  document.querySelectorAll('.context-btn').forEach(btn => {
+    btn.addEventListener('click', () => setContext(btn.getAttribute('data-context')));
+  });
+
   // ---------- Clearable text fields ----------
   // Delegated on document so it works for every current and future sheet
   // without each one needing its own listener wiring.
@@ -1923,6 +1958,7 @@
   }
 
   document.getElementById('app-version').textContent = 'v' + APP_VERSION;
+  document.body.dataset.context = currentContext;
 
   // Backfill cost for trips saved before the rate feature existed, or before a rate was configured.
   (function backfillCosts() {

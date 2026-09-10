@@ -20,6 +20,12 @@
   color-scheme: dark;
 }
 
+body[data-context="immobilien"] {
+  --accent: #3ba9c7;
+  --accent-dim: #1f6c80;
+  --accent-text: #06181c;
+}
+
 * { box-sizing: border-box; }
 
 html, body {
@@ -73,6 +79,33 @@ body {
   border: 1px solid rgba(227, 93, 93, 0.35);
   padding: 4px 10px;
   border-radius: 999px;
+}
+
+.context-switch {
+  display: flex;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.context-btn {
+  flex: 1;
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 9px;
+  border-radius: 999px;
+  transition: background-color .15s ease, color .15s ease, border-color .15s ease;
+}
+
+.context-btn.active {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent);
 }
 
 main {
