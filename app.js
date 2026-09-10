@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.1.0';
+  const APP_VERSION = '3.2.0';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -10,6 +10,7 @@
     trips: [],
     locations: [],
     vehicles: [],
+    objekte: [],
     routeCache: {},
     rates: [],
     settings: { orsApiKey: '', homeLocationId: null, workLocationId: null }
@@ -35,6 +36,7 @@
     trips: loadKey('trips'),
     locations: loadKey('locations'),
     vehicles: loadKey('vehicles'),
+    objekte: loadKey('objekte'),
     routeCache: loadKey('routeCache'),
     rates: loadKey('rates'),
     settings: loadKey('settings')
@@ -68,6 +70,7 @@
       startDateTime: toDatetimeLocalValue(now),
       endDateTime: '',
       vehiclePlate: '',
+      objektKuerzel: '',
       note: '',
       ratePerKm: null,
       rateSource: 'auto', // auto | manual
@@ -305,6 +308,14 @@
     if (vehicle) { vehicle.usageCount = (vehicle.usageCount || 0) + 1; vehicle.lastUsedAt = t; }
     saveKey('locations');
     saveKey('vehicles');
+  }
+
+  function bumpObjektUsage(kuerzel) {
+    const obj = state.objekte.find(o => o.kuerzel === kuerzel);
+    if (!obj) return;
+    obj.usageCount = (obj.usageCount || 0) + 1;
+    obj.lastUsedAt = nowIso();
+    saveKey('objekte');
   }
 
   // ---------- Kilometersatz / Kosten ----------
@@ -654,12 +665,14 @@
 
   // ---------- Trip CRUD ----------
   function validateDraft() {
-    return !!(draft.startLocationId && draft.endLocationId && draft.startDateTime && draft.vehiclePlate);
+    if (!(draft.startLocationId && draft.endLocationId && draft.startDateTime && draft.vehiclePlate)) return false;
+    if (draft.context === 'immobilien' && !draft.objektKuerzel) return false;
+    return true;
   }
 
   async function saveTrip() {
     if (!validateDraft()) {
-      toast('Bitte Start, Ziel, Datum und Fahrzeug angeben');
+      toast(draft.context === 'immobilien' ? 'Bitte Start, Ziel, Datum, Fahrzeug und Objekt angeben' : 'Bitte Start, Ziel, Datum und Fahrzeug angeben');
       return;
     }
     const startLoc = findLocation(draft.startLocationId);
@@ -675,6 +688,7 @@
         startDateTime: draft.startDateTime,
         endDateTime: draft.endDateTime,
         vehiclePlate: draft.vehiclePlate,
+        objektKuerzel: draft.objektKuerzel || null,
         note: draft.note,
         ratePerKm: draft.ratePerKm,
         rateSource: draft.rateSource,
@@ -686,6 +700,7 @@
         trip.distanceError = null;
       }
       bumpUsage(startLoc, endLoc, veh);
+      if (trip.context === 'immobilien') bumpObjektUsage(trip.objektKuerzel);
       computeCost(trip);
       saveKey('trips');
       if (trip.distanceStatus !== 'ok') {
@@ -705,6 +720,7 @@
         startDateTime: draft.startDateTime,
         endDateTime: draft.endDateTime,
         vehiclePlate: draft.vehiclePlate,
+        objektKuerzel: draft.objektKuerzel || null,
         note: draft.note,
         ratePerKm: draft.ratePerKm,
         rateSource: draft.rateSource,
@@ -714,6 +730,7 @@
       };
       state.trips.push(trip);
       bumpUsage(startLoc, endLoc, veh);
+      if (trip.context === 'immobilien') bumpObjektUsage(trip.objektKuerzel);
       computeCost(trip);
       saveKey('trips');
       if (trip.distanceStatus !== 'ok') {
@@ -742,6 +759,7 @@
       startDateTime: trip.startDateTime,
       endDateTime: trip.endDateTime,
       vehiclePlate: trip.vehiclePlate,
+      objektKuerzel: trip.objektKuerzel || '',
       note: trip.note,
       ratePerKm: trip.ratePerKm != null ? trip.ratePerKm : null,
       rateSource: trip.rateSource || 'auto',
@@ -1147,6 +1165,30 @@
     });
   }
 
+  function openObjektPicker() {
+    const items = sortedByRecency(state.objekte).map(o => ({ ...o, __id: o.kuerzel }));
+    openPicker({
+      title: 'Objekt wählen',
+      searchPlaceholder: 'Objekt suchen oder neu eingeben',
+      items,
+      matches: (it, q) => it.kuerzel.toLowerCase().includes(q),
+      renderItem: (it) => ({ primary: it.kuerzel, secondary: '' }),
+      onSelect: (it) => { closeSheet(); draft.objektKuerzel = it.kuerzel; render(); },
+      onCreate: (query) => {
+        const kuerzel = query.trim();
+        let obj = state.objekte.find(o => o.kuerzel === kuerzel);
+        if (!obj) {
+          obj = { kuerzel, usageCount: 0, lastUsedAt: null };
+          state.objekte.push(obj);
+          saveKey('objekte');
+        }
+        closeSheet();
+        draft.objektKuerzel = obj.kuerzel;
+        render();
+      }
+    });
+  }
+
   function openTimeEditor(role) {
     closeSheet();
     const current = role === 'start' ? draft.startDateTime : draft.endDateTime;
@@ -1256,6 +1298,7 @@
       trips: state.trips,
       locations: state.locations,
       vehicles: state.vehicles,
+      objekte: state.objekte,
       rates: state.rates,
       routeCache: state.routeCache,
       settings: state.settings
@@ -1276,7 +1319,7 @@
 
   async function importBackupFile(file) {
     const cloudNote = currentUser ? ' Da du angemeldet bist, wird dies auch mit all deinen anderen angemeldeten Geräten synchronisiert.' : '';
-    const ok = await confirmDialog(`Dies ersetzt ALLE aktuellen Daten (Reisen, Adressen, Fahrzeuge, Sätze, API-Key) durch den Inhalt der Backup-Datei.${cloudNote} Fortfahren?`, 'Ersetzen');
+    const ok = await confirmDialog(`Dies ersetzt ALLE aktuellen Daten (Reisen, Adressen, Fahrzeuge, Objekte, Sätze, API-Key) durch den Inhalt der Backup-Datei.${cloudNote} Fortfahren?`, 'Ersetzen');
     if (!ok) return;
     try {
       const text = await file.text();
@@ -1285,12 +1328,14 @@
       state.trips = Array.isArray(data.trips) ? data.trips : [];
       state.locations = Array.isArray(data.locations) ? data.locations : [];
       state.vehicles = Array.isArray(data.vehicles) ? data.vehicles : [];
+      state.objekte = Array.isArray(data.objekte) ? data.objekte : [];
       state.rates = Array.isArray(data.rates) ? data.rates : [];
       state.routeCache = (data.routeCache && typeof data.routeCache === 'object') ? data.routeCache : {};
       state.settings = (data.settings && typeof data.settings === 'object') ? data.settings : { orsApiKey: '' };
       saveKey('trips');
       saveKey('locations');
       saveKey('vehicles');
+      saveKey('objekte');
       saveKey('rates');
       saveKey('routeCache');
       saveKey('settings');
@@ -1302,7 +1347,7 @@
   }
 
   // ---------- Cloud sync (Firebase) ----------
-  const CLOUD_SYNCED_KEYS = ['trips', 'locations', 'vehicles', 'rates', 'settings']; // not routeCache: regenerable, no data-loss risk
+  const CLOUD_SYNCED_KEYS = ['trips', 'locations', 'vehicles', 'objekte', 'rates', 'settings']; // not routeCache: regenerable, no data-loss risk
 
   const firebaseConfig = {
     apiKey: 'AIzaSyDLfAXQUAWnv31czdwS_u4OZ_FnTlTolbI',
@@ -1607,6 +1652,15 @@
     render();
   }
 
+  async function deleteObjekt(kuerzel) {
+    const ok = await confirmDialog('Dieses Objekt löschen?');
+    if (!ok) return;
+    state.objekte = state.objekte.filter(o => o.kuerzel !== kuerzel);
+    saveKey('objekte');
+    toast('Objekt gelöscht');
+    render();
+  }
+
   // ---------- Views ----------
   function distanceBoxHtml(entry, retryAction) {
     if (!entry.startLocationId || !entry.endLocationId) {
@@ -1698,6 +1752,14 @@
             <span class="chev">›</span>
           </button>
         </div>
+        ${currentContext === 'immobilien' ? `
+        <div class="field">
+          <label>Objekt</label>
+          <button class="picker-trigger" id="btn-pick-objekt">
+            <span class="${draft.objektKuerzel ? '' : 'placeholder'}">${draft.objektKuerzel ? escapeHtml(draft.objektKuerzel) : 'Objekt wählen'}</span>
+            <span class="chev">›</span>
+          </button>
+        </div>` : ''}
         <div class="field">
           <label>Notiz (optional)</label>
           <div class="text-input-wrap textarea-wrap">
@@ -1718,6 +1780,8 @@
     document.getElementById('btn-gps-start').addEventListener('click', () => useGpsForRole('start'));
     document.getElementById('btn-gps-end').addEventListener('click', () => useGpsForRole('end'));
     document.getElementById('btn-pick-vehicle').addEventListener('click', openVehiclePicker);
+    const pickObjektBtn = document.getElementById('btn-pick-objekt');
+    if (pickObjektBtn) pickObjektBtn.addEventListener('click', openObjektPicker);
     document.getElementById('btn-save-trip').addEventListener('click', saveTrip);
     const cancelBtn = document.getElementById('btn-cancel-edit');
     if (cancelBtn) cancelBtn.addEventListener('click', cancelEdit);
@@ -1786,6 +1850,7 @@
               <span class="trip-km">${distText}</span>
             </div>
             <div class="trip-meta">${formatDateTime(trip.startDateTime)}${trip.endDateTime ? ' – ' + formatDateTime(trip.endDateTime) : ' · <span class="warn-text">keine Rückkehrzeit</span>'}</div>
+            ${trip.context === 'immobilien' && trip.objektKuerzel ? `<div class="trip-meta">Objekt: ${escapeHtml(trip.objektKuerzel)}</div>` : ''}
             <div class="trip-meta">${escapeHtml(trip.vehiclePlate)}${trip.ratePerKm != null ? ' · ' + formatEuroPerKm(trip.ratePerKm) : ''}</div>
             ${trip.note ? `<div class="trip-note">${escapeHtml(trip.note)}</div>` : ''}
             ${trip.distanceStatus === 'pending' ? `<div class="hint">${escapeHtml(trip.distanceError || 'Distanz wird nachgeholt, sobald Internet verfügbar ist.')}</div>` : ''}
@@ -1839,6 +1904,14 @@
           <button class="btn-danger" data-del-veh="${escapeHtml(v.plate)}">Löschen</button>
         </div>`).join('')
       : `<div class="hint">Noch keine Kennzeichen gespeichert.</div>`;
+
+    const objRows = state.objekte.length
+      ? sortedByRecency(state.objekte).map(o => `
+        <div class="manage-row">
+          <div>${escapeHtml(o.kuerzel)}</div>
+          <button class="btn-danger" data-del-obj="${escapeHtml(o.kuerzel)}">Löschen</button>
+        </div>`).join('')
+      : `<div class="hint">Noch keine Objekte gespeichert.</div>`;
 
     const rateRows = state.rates.length
       ? [...state.rates].sort((a, b) => b.validFrom.localeCompare(a.validFrom)).map(r => `
@@ -1930,6 +2003,10 @@
       <div class="section-title">Gespeicherte Kennzeichen</div>
       <div class="card">${vehRows}</div>
 
+      ${currentContext === 'immobilien' ? `
+      <div class="section-title">Gespeicherte Objekte</div>
+      <div class="card">${objRows}</div>` : ''}
+
       <div class="hint" style="margin-top:18px; padding: 0 4px;">${currentUser ? 'Deine Daten werden mit deinem Google-Konto synchronisiert und stehen auf all deinen angemeldeten Geräten zur Verfügung.' : 'Alle Daten (Reisen, Adressen, Fahrzeuge) liegen ausschließlich lokal in diesem Browser auf diesem Gerät. Mit Cloud-Synchronisation (oben) stehen sie auch auf deinen anderen Geräten zur Verfügung.'}</div>
     `;
   }
@@ -1959,6 +2036,9 @@
     });
     document.querySelectorAll('[data-del-veh]').forEach(btn => {
       btn.addEventListener('click', () => deleteVehicle(btn.getAttribute('data-del-veh')));
+    });
+    document.querySelectorAll('[data-del-obj]').forEach(btn => {
+      btn.addEventListener('click', () => deleteObjekt(btn.getAttribute('data-del-obj')));
     });
     const addRateBtn = document.getElementById('btn-add-rate');
     if (addRateBtn) addRateBtn.addEventListener('click', addRate);
