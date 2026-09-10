@@ -501,12 +501,15 @@ button {
 }
 
 #flash-overlay.flash {
-  animation: flash-pulse 380ms ease-out;
+  animation: flash-pulse 460ms ease-out;
 }
 
 @keyframes flash-pulse {
   0% { opacity: 0; }
-  15% { opacity: 0.55; }
+  18% { opacity: 0.55; }
+  36% { opacity: 0; }
+  54% { opacity: 0.55; }
+  72% { opacity: 0; }
   100% { opacity: 0; }
 }
 
