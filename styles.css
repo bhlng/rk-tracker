@@ -17,13 +17,21 @@
   --radius-sm: 8px;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --topbar-bg: rgba(18, 20, 27, 0.92);
+  --tabbar-bg: rgba(26, 29, 39, 0.94);
   color-scheme: dark;
 }
 
 body[data-context="immobilien"] {
-  --accent: #3ba9c7;
-  --accent-dim: #1f6c80;
-  --accent-text: #06181c;
+  --accent: #4caf6e;
+  --accent-dim: #2f7a48;
+  --accent-text: #06180d;
+  --bg: #101612;
+  --bg-elevated: #171f1a;
+  --bg-elevated-2: #202b23;
+  --border: #2a352e;
+  --topbar-bg: rgba(16, 22, 18, 0.92);
+  --tabbar-bg: rgba(23, 31, 26, 0.94);
 }
 
 * { box-sizing: border-box; }
@@ -35,6 +43,7 @@ html, body {
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
   -webkit-tap-highlight-color: transparent;
+  transition: background-color .3s ease;
 }
 
 body {
@@ -51,9 +60,10 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: calc(14px + var(--safe-top)) 20px 14px;
-  background: rgba(18, 20, 27, 0.92);
+  background: var(--topbar-bg);
   backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--border);
+  transition: background-color .3s ease, border-color .3s ease;
 }
 
 .topbar h1 {
@@ -87,6 +97,7 @@ body {
   padding: 10px 16px;
   background: var(--bg);
   border-bottom: 1px solid var(--border);
+  transition: background-color .3s ease, border-color .3s ease;
 }
 
 .context-btn {
@@ -116,17 +127,27 @@ main {
   margin: 0 auto;
 }
 
+#view-root.context-transition {
+  animation: context-enter 280ms ease-out;
+}
+
+@keyframes context-enter {
+  0% { opacity: 0; transform: translateY(10px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
 .tabbar {
   position: fixed;
   bottom: 0;
   left: 0;
   right: 0;
   display: flex;
-  background: rgba(26, 29, 39, 0.94);
+  background: var(--tabbar-bg);
   backdrop-filter: blur(14px);
   border-top: 1px solid var(--border);
   padding: 8px 12px calc(8px + var(--safe-bottom));
   z-index: 20;
+  transition: background-color .3s ease, border-color .3s ease;
 }
 
 .tab-btn {

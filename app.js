@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.0.0';
+  const APP_VERSION = '3.0.1';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -49,6 +49,7 @@
   let currentContext = loadContext(); // 'pendeln' | 'immobilien' — persisted locally, unlike currentView
   let editingTripId = null;
   let draft = makeEmptyDraft();
+  const draftsByContext = {}; // stashes each context's in-progress new-trip draft while the other is active
 
   function makeEmptyDraft() {
     const now = new Date();
@@ -75,11 +76,19 @@
   function setContext(ctx) {
     if (ctx === currentContext) return;
     const proceed = () => {
+      // Keep whatever's been typed into an unsaved new-trip draft so it's
+      // still there when the user switches back — only a discarded edit
+      // (handled below, before editingTripId is cleared) isn't kept.
+      if (!editingTripId) draftsByContext[currentContext] = draft;
       currentContext = ctx;
       try { localStorage.setItem(STORAGE_PREFIX + 'currentContext', ctx); } catch (e) { /* localStorage unavailable */ }
       document.body.dataset.context = ctx;
       editingTripId = null;
-      draft = makeEmptyDraft();
+      draft = draftsByContext[ctx] || makeEmptyDraft();
+      const root = document.getElementById('view-root');
+      root.classList.remove('context-transition');
+      void root.offsetWidth; // restart the CSS animation
+      root.classList.add('context-transition');
       render();
     };
     if (editingTripId) {
@@ -306,6 +315,10 @@
   // Mutates `entry` (a trip or the draft): resolves ratePerKm (unless manually overridden)
   // and (re)computes cost from the current distanceKm. Safe to call any time.
   function computeCost(entry) {
+    if (entry.context === 'immobilien') {
+      entry.cost = null; // Immobilien-Kilometersatz folgt in einer späteren Phase
+      return;
+    }
     if (entry.rateSource !== 'manual') {
       const r = findApplicableRate(entry.startDateTime);
       entry.ratePerKm = r ? r.amount : null;
@@ -359,12 +372,12 @@
       }
       saveKey('trips');
     }
-    toast('Kilometersatz gespeichert');
+    toast('Pendlerpauschale gespeichert');
     render();
   }
 
   async function deleteRate(id) {
-    const ok = await confirmDialog('Diesen Kilometersatz löschen?');
+    const ok = await confirmDialog('Diese Pendlerpauschale löschen?');
     if (!ok) return;
     state.rates = state.rates.filter(r => r.id !== id);
     saveKey('rates');
@@ -1173,7 +1186,7 @@
       <div class="sheet" role="dialog">
         <div class="sheet-handle"></div>
         <div class="sheet-header">
-          <h2>Kilometersatz für diese Fahrt</h2>
+          <h2>Pendlerpauschale für diese Fahrt</h2>
           <button class="btn-text" id="sheet-close">Abbrechen</button>
         </div>
         <form id="rate-form" style="padding: 4px 18px 20px;">
@@ -1649,10 +1662,11 @@
             </button>
           </div>
         </div>
+        ${currentContext === 'pendeln' ? `
         <div class="field">
-          <label>Kilometersatz</label>
+          <label>Pendlerpauschale</label>
           ${rateBoxHtml(draft)}
-        </div>
+        </div>` : ''}
         <div class="field">
           <label>Fahrzeug</label>
           <button class="picker-trigger" id="btn-pick-vehicle">
@@ -1698,7 +1712,8 @@
       render();
     });
     document.getElementById('btn-pick-end-time').addEventListener('click', () => openTimeEditor('end'));
-    document.getElementById('btn-edit-rate').addEventListener('click', openRateEditor);
+    const editRateBtn = document.getElementById('btn-edit-rate');
+    if (editRateBtn) editRateBtn.addEventListener('click', openRateEditor);
     const noteEl = document.getElementById('input-note');
     noteEl.addEventListener('input', (e) => {
       draft.note = e.target.value;
@@ -1750,7 +1765,7 @@
             <div class="trip-meta">${escapeHtml(trip.vehiclePlate)}${trip.ratePerKm != null ? ' · ' + formatEuroPerKm(trip.ratePerKm) : ''}</div>
             ${trip.note ? `<div class="trip-note">${escapeHtml(trip.note)}</div>` : ''}
             ${trip.distanceStatus === 'pending' ? `<div class="hint">${escapeHtml(trip.distanceError || 'Distanz wird nachgeholt, sobald Internet verfügbar ist.')}</div>` : ''}
-            ${trip.distanceStatus === 'ok' && trip.cost == null ? `<div class="hint">Kein Kilometersatz für dieses Datum hinterlegt.</div>` : ''}
+            ${(trip.context || 'pendeln') === 'pendeln' && trip.distanceStatus === 'ok' && trip.cost == null ? `<div class="hint">Keine Pendlerpauschale für dieses Datum hinterlegt.</div>` : ''}
             ${[findLocation(trip.startLocationId), findLocation(trip.endLocationId)].some(l => l && isUnverifiedLocation(l)) ? `<div class="hint warn-text">Manuell erfasste Adresse — bitte Genauigkeit prüfen</div>` : ''}
             <div class="trip-actions">
               <button class="btn-text" data-edit="${escapeHtml(trip.id)}">Bearbeiten</button>
@@ -1807,7 +1822,7 @@
           <div>ab ${formatDateOnly(r.validFrom)} <span class="sub">${formatEuroPerKm(r.amount)}</span></div>
           <button class="btn-danger" data-del-rate="${escapeHtml(r.id)}">Löschen</button>
         </div>`).join('')
-      : `<div class="hint">Noch kein Kilometersatz hinterlegt. Ohne Satz werden keine Kosten berechnet.</div>`;
+      : `<div class="hint">Noch keine Pendlerpauschale hinterlegt. Ohne Satz werden keine Kosten berechnet.</div>`;
 
     return `
       <div class="section-title">Cloud-Synchronisation</div>
@@ -1829,7 +1844,8 @@
         <input type="file" id="import-backup-input" accept="application/json,.json" hidden>
       </div>
 
-      <div class="section-title">Kilometersatz</div>
+      ${currentContext === 'pendeln' ? `
+      <div class="section-title">Pendlerpauschale</div>
       <div class="card">
         ${rateRows}
         <div class="field" style="margin-top:16px;">
@@ -1841,7 +1857,7 @@
           <div class="hint">Betrag in Euro pro Kilometer, gültig ab dem gewählten Datum. Bei rückwirkenden Änderungen fragen wir nach, ob bereits erfasste Fahrten angepasst werden sollen.</div>
         </div>
         <button class="btn-secondary" id="btn-add-rate">Satz speichern</button>
-      </div>
+      </div>` : ''}
 
       <div class="section-title">Routing</div>
       <div class="card">
@@ -1892,7 +1908,8 @@
     document.querySelectorAll('[data-del-veh]').forEach(btn => {
       btn.addEventListener('click', () => deleteVehicle(btn.getAttribute('data-del-veh')));
     });
-    document.getElementById('btn-add-rate').addEventListener('click', addRate);
+    const addRateBtn = document.getElementById('btn-add-rate');
+    if (addRateBtn) addRateBtn.addEventListener('click', addRate);
     document.querySelectorAll('[data-del-rate]').forEach(btn => {
       btn.addEventListener('click', () => deleteRate(btn.getAttribute('data-del-rate')));
     });
