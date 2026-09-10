@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '2.3.0';
+  const APP_VERSION = '2.3.1';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -1279,34 +1279,43 @@
     });
   }
 
+  const CLOUD_LINKED_UID_KEY = STORAGE_PREFIX + 'cloudLinkedUid';
+
   async function handleSignedIn(user) {
     currentUser = user;
     cloudSyncStatus = 'syncing';
     render();
     const userDocsRef = fbDb.collection('users').doc(user.uid).collection('data');
     try {
-      const settingsSnap = await userDocsRef.doc('settings').get();
-      const cloudHasData = settingsSnap.exists;
-      const localHasData = state.trips.length || state.locations.length || state.vehicles.length || state.rates.length;
+      // Once this device has been linked to this account, treat every later
+      // app start as "already synced" and go straight to live listeners —
+      // the migration prompts below are only for the one-time first link.
+      const alreadyLinked = localStorage.getItem(CLOUD_LINKED_UID_KEY) === user.uid;
+      if (!alreadyLinked) {
+        const settingsSnap = await userDocsRef.doc('settings').get();
+        const cloudHasData = settingsSnap.exists;
+        const localHasData = state.trips.length || state.locations.length || state.vehicles.length || state.rates.length;
 
-      if (!cloudHasData && localHasData) {
-        const ok = await confirmDialog('Lokale Daten in die Cloud hochladen? Damit stehen sie auch auf deinen anderen Geräten zur Verfügung.', 'Hochladen');
-        if (ok) {
-          for (const key of CLOUD_SYNCED_KEYS) {
-            await userDocsRef.doc(key).set(keyToDocData(key));
+        if (!cloudHasData && localHasData) {
+          const ok = await confirmDialog('Lokale Daten in die Cloud hochladen? Damit stehen sie auch auf deinen anderen Geräten zur Verfügung.', 'Hochladen');
+          if (ok) {
+            for (const key of CLOUD_SYNCED_KEYS) {
+              await userDocsRef.doc(key).set(keyToDocData(key));
+            }
+          }
+        } else if (cloudHasData && localHasData) {
+          const ok = await confirmDialog('In der Cloud sind bereits Daten von einem anderen Gerät vorhanden. Jetzt laden? Die lokalen Daten auf diesem Gerät werden dabei ersetzt.', 'Cloud-Daten laden');
+          if (ok) {
+            for (const key of CLOUD_SYNCED_KEYS) {
+              const snap = await userDocsRef.doc(key).get();
+              applyingRemoteUpdate = true;
+              applyDocDataToKey(key, snap.exists ? snap.data() : null);
+              saveKey(key);
+              applyingRemoteUpdate = false;
+            }
           }
         }
-      } else if (cloudHasData && localHasData) {
-        const ok = await confirmDialog('In der Cloud sind bereits Daten von einem anderen Gerät vorhanden. Jetzt laden? Die lokalen Daten auf diesem Gerät werden dabei ersetzt.', 'Cloud-Daten laden');
-        if (ok) {
-          for (const key of CLOUD_SYNCED_KEYS) {
-            const snap = await userDocsRef.doc(key).get();
-            applyingRemoteUpdate = true;
-            applyDocDataToKey(key, snap.exists ? snap.data() : null);
-            saveKey(key);
-            applyingRemoteUpdate = false;
-          }
-        }
+        try { localStorage.setItem(CLOUD_LINKED_UID_KEY, user.uid); } catch (e) { /* localStorage unavailable */ }
       }
       attachCloudListeners(userDocsRef);
       cloudSyncStatus = 'synced';
