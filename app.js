@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.6.4';
+  const APP_VERSION = '3.7.0';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -11,6 +11,7 @@
     locations: [],
     vehicles: [],
     objekte: [],
+    carriers: [],
     noteSuggestions: [
       { id: 'default-1', text: 'Wohnungsübergabe' },
       { id: 'default-2', text: 'Wohnungsbesichtigung' },
@@ -45,6 +46,7 @@
     locations: loadKey('locations'),
     vehicles: loadKey('vehicles'),
     objekte: loadKey('objekte'),
+    carriers: loadKey('carriers'),
     noteSuggestions: loadKey('noteSuggestions'),
     routeCache: loadKey('routeCache'),
     rates: loadKey('rates'),
@@ -82,6 +84,9 @@
       endDateTime: '',
       vehiclePlate: '',
       objektKuerzel: '',
+      verkehrsmittel: currentContext === 'immobilien' ? 'kfz' : undefined, // Immobilien only: kfz | oepv
+      carrierId: null, // Immobilien + oepv only
+      ticketPrice: null, // Immobilien + oepv only, optional
       note: '',
       ratePerKm: null,
       rateSource: 'auto', // auto | manual
@@ -384,6 +389,12 @@
   // and (re)computes cost from the current distanceKm. Safe to call any time. Pendeln and
   // Immobilien keep separate, independent rate histories (state.rates / state.immoRates).
   function computeCost(entry) {
+    if (entry.context === 'immobilien' && entry.verkehrsmittel === 'oepv') {
+      // No distance/rate math for public transport — cost is whatever
+      // ticket price was entered, or unknown (flagged in the UI) if not.
+      entry.cost = entry.ticketPrice != null ? entry.ticketPrice : null;
+      return;
+    }
     const isImmo = entry.context === 'immobilien';
     const ratesArray = isImmo ? state.immoRates : state.rates;
     if (entry.rateSource !== 'manual') {
@@ -715,8 +726,19 @@
   }
 
   // Dispatches to the right distance calculator depending on whether `entry`
-  // is an Immobilien trip/draft using the newer waypoints model.
+  // is an Immobilien trip/draft using the newer waypoints model. ÖPV trips
+  // skip distance entirely — a driving distance is meaningless for a train/
+  // bus ride and not worth spending ORS quota on; cost comes from the
+  // ticket price instead (see computeCost).
   function calcEntryDistance(entry) {
+    if (entry.context === 'immobilien' && entry.verkehrsmittel === 'oepv') {
+      entry.distanceStatus = 'empty';
+      entry.distanceKm = null;
+      entry.distanceError = null;
+      entry.legs = null;
+      computeCost(entry);
+      return Promise.resolve();
+    }
     return (entry.context === 'immobilien' && Array.isArray(entry.waypoints))
       ? calcWaypointDistance(entry)
       : calcDistance(entry);
@@ -758,7 +780,7 @@
       render();
       return;
     }
-    const p = calcWaypointDistance(draft);
+    const p = calcEntryDistance(draft);
     render();
     await p;
     render();
@@ -795,9 +817,22 @@
       render();
       return;
     }
-    const p = calcWaypointDistance(draft);
+    const p = calcEntryDistance(draft);
     render();
     await p;
+    render();
+  }
+
+  function setDraftVerkehrsmittel(mode) {
+    if (draft.verkehrsmittel === mode) return;
+    draft.verkehrsmittel = mode;
+    if (mode === 'oepv') {
+      draft.vehiclePlate = '';
+    } else {
+      draft.carrierId = null;
+      draft.ticketPrice = null;
+    }
+    computeCost(draft);
     render();
   }
 
@@ -824,7 +859,7 @@
   async function retryDraftDistance() {
     if (draft.context === 'immobilien' && Array.isArray(draft.waypoints)) {
       if (!draft.waypoints.every((id) => id)) return;
-      const p = calcWaypointDistance(draft);
+      const p = calcEntryDistance(draft);
       render();
       await p;
       render();
@@ -906,7 +941,9 @@
     const hasRoute = (draft.context === 'immobilien' && Array.isArray(draft.waypoints))
       ? draft.waypoints.length >= 2 && draft.waypoints.every((id) => id)
       : !!(draft.startLocationId && draft.endLocationId);
-    if (!hasRoute || !draft.startDateTime || !draft.vehiclePlate) return false;
+    const isOepv = draft.context === 'immobilien' && draft.verkehrsmittel === 'oepv';
+    const hasTransport = isOepv ? !!draft.carrierId : !!draft.vehiclePlate;
+    if (!hasRoute || !draft.startDateTime || !hasTransport) return false;
     if (draft.context === 'immobilien' && !draft.objektKuerzel) return false;
     return true;
   }
@@ -914,18 +951,22 @@
   async function saveTrip() {
     if (!validateDraft()) {
       const isImmoWaypoints = draft.context === 'immobilien' && Array.isArray(draft.waypoints);
-      toast(isImmoWaypoints ? 'Bitte alle Stopps, Datum, Fahrzeug und Objekt angeben' : (draft.context === 'immobilien' ? 'Bitte Start, Ziel, Datum, Fahrzeug und Objekt angeben' : 'Bitte Start, Ziel, Datum und Fahrzeug angeben'));
+      const isOepv = draft.context === 'immobilien' && draft.verkehrsmittel === 'oepv';
+      const transportWord = isOepv ? 'Verkehrsmittel' : 'Fahrzeug';
+      toast(isImmoWaypoints ? `Bitte alle Stopps, Datum, ${transportWord} und Objekt angeben` : (draft.context === 'immobilien' ? `Bitte Start, Ziel, Datum, ${transportWord} und Objekt angeben` : 'Bitte Start, Ziel, Datum und Fahrzeug angeben'));
       return;
     }
     const isImmoWaypoints = draft.context === 'immobilien' && Array.isArray(draft.waypoints);
+    const isOepv = draft.context === 'immobilien' && draft.verkehrsmittel === 'oepv';
     const startLoc = isImmoWaypoints ? null : findLocation(draft.startLocationId);
     const endLoc = isImmoWaypoints ? null : findLocation(draft.endLocationId);
-    const veh = state.vehicles.find(v => v.plate === draft.vehiclePlate);
+    const veh = isOepv ? null : state.vehicles.find(v => v.plate === draft.vehiclePlate);
 
     if (editingTripId) {
       const trip = state.trips.find(t => t.id === editingTripId);
       const routeChanged = trip.startLocationId !== draft.startLocationId || trip.endLocationId !== draft.endLocationId ||
-        JSON.stringify(trip.waypoints || null) !== JSON.stringify(draft.waypoints || null);
+        JSON.stringify(trip.waypoints || null) !== JSON.stringify(draft.waypoints || null) ||
+        (trip.verkehrsmittel || 'kfz') !== (draft.verkehrsmittel || 'kfz'); // switching Kfz/ÖPV invalidates any cached distance
       Object.assign(trip, {
         startLocationId: draft.startLocationId,
         endLocationId: draft.endLocationId,
@@ -935,6 +976,9 @@
         endDateTime: draft.endDateTime,
         vehiclePlate: draft.vehiclePlate,
         objektKuerzel: draft.objektKuerzel || null,
+        verkehrsmittel: draft.context === 'immobilien' ? (draft.verkehrsmittel || 'kfz') : null,
+        carrierId: isOepv ? draft.carrierId : null,
+        ticketPrice: isOepv ? (draft.ticketPrice != null ? draft.ticketPrice : null) : null,
         note: draft.note,
         ratePerKm: draft.ratePerKm,
         rateSource: draft.rateSource,
@@ -949,6 +993,7 @@
       bumpUsage(startLoc, endLoc, veh);
       if (isImmoWaypoints) bumpWaypointUsage(draft.waypoints);
       if (trip.context === 'immobilien') bumpObjektUsage(trip.objektKuerzel);
+      if (isOepv) bumpCarrierUsage(trip.carrierId);
       computeCost(trip);
       saveKey('trips');
       if (trip.distanceStatus !== 'ok') {
@@ -971,6 +1016,9 @@
         endDateTime: draft.endDateTime,
         vehiclePlate: draft.vehiclePlate,
         objektKuerzel: draft.objektKuerzel || null,
+        verkehrsmittel: draft.context === 'immobilien' ? (draft.verkehrsmittel || 'kfz') : null,
+        carrierId: isOepv ? draft.carrierId : null,
+        ticketPrice: isOepv ? (draft.ticketPrice != null ? draft.ticketPrice : null) : null,
         note: draft.note,
         ratePerKm: draft.ratePerKm,
         rateSource: draft.rateSource,
@@ -983,6 +1031,7 @@
       bumpUsage(startLoc, endLoc, veh);
       if (isImmoWaypoints) bumpWaypointUsage(draft.waypoints);
       if (trip.context === 'immobilien') bumpObjektUsage(trip.objektKuerzel);
+      if (isOepv) bumpCarrierUsage(trip.carrierId);
       computeCost(trip);
       saveKey('trips');
       if (trip.distanceStatus !== 'ok') {
@@ -1019,6 +1068,11 @@
       endDateTime: trip.endDateTime,
       vehiclePlate: trip.vehiclePlate,
       objektKuerzel: trip.objektKuerzel || '',
+      // Legacy Immobilien trips saved before ÖPV existed (Phase 1-5) have no
+      // verkehrsmittel field — treat them as Kfz, matching their actual data.
+      verkehrsmittel: trip.context === 'immobilien' ? (trip.verkehrsmittel || 'kfz') : undefined,
+      carrierId: trip.carrierId || null,
+      ticketPrice: trip.ticketPrice != null ? trip.ticketPrice : null,
       note: trip.note,
       ratePerKm: trip.ratePerKm != null ? trip.ratePerKm : null,
       rateSource: trip.rateSource || 'auto',
@@ -1583,6 +1637,7 @@
       locations: state.locations,
       vehicles: state.vehicles,
       objekte: state.objekte,
+      carriers: state.carriers,
       noteSuggestions: state.noteSuggestions,
       rates: state.rates,
       immoRates: state.immoRates,
@@ -1605,7 +1660,7 @@
 
   async function importBackupFile(file) {
     const cloudNote = currentUser ? ' Da du angemeldet bist, wird dies auch mit all deinen anderen angemeldeten Geräten synchronisiert.' : '';
-    const ok = await confirmDialog(`Dies ersetzt ALLE aktuellen Daten (Reisen, Adressen, Fahrzeuge, Objekte, Anlass-Vorschläge, Sätze, API-Key) durch den Inhalt der Backup-Datei.${cloudNote} Fortfahren?`, 'Ersetzen');
+    const ok = await confirmDialog(`Dies ersetzt ALLE aktuellen Daten (Reisen, Adressen, Fahrzeuge, Objekte, Verkehrsmittel, Anlass-Vorschläge, Sätze, API-Key) durch den Inhalt der Backup-Datei.${cloudNote} Fortfahren?`, 'Ersetzen');
     if (!ok) return;
     try {
       const text = await file.text();
@@ -1615,6 +1670,7 @@
       state.locations = Array.isArray(data.locations) ? data.locations : [];
       state.vehicles = Array.isArray(data.vehicles) ? data.vehicles : [];
       state.objekte = Array.isArray(data.objekte) ? data.objekte : [];
+      state.carriers = Array.isArray(data.carriers) ? data.carriers : [];
       state.noteSuggestions = Array.isArray(data.noteSuggestions) ? data.noteSuggestions : JSON.parse(JSON.stringify(DEFAULTS.noteSuggestions));
       state.rates = Array.isArray(data.rates) ? data.rates : [];
       state.immoRates = Array.isArray(data.immoRates) ? data.immoRates : [];
@@ -1624,6 +1680,7 @@
       saveKey('locations');
       saveKey('vehicles');
       saveKey('objekte');
+      saveKey('carriers');
       saveKey('noteSuggestions');
       saveKey('rates');
       saveKey('immoRates');
@@ -1637,7 +1694,7 @@
   }
 
   // ---------- Cloud sync (Firebase) ----------
-  const CLOUD_SYNCED_KEYS = ['trips', 'locations', 'vehicles', 'objekte', 'noteSuggestions', 'rates', 'immoRates', 'settings']; // not routeCache: regenerable, no data-loss risk
+  const CLOUD_SYNCED_KEYS = ['trips', 'locations', 'vehicles', 'objekte', 'carriers', 'noteSuggestions', 'rates', 'immoRates', 'settings']; // not routeCache: regenerable, no data-loss risk
 
   const firebaseConfig = {
     apiKey: 'AIzaSyDLfAXQUAWnv31czdwS_u4OZ_FnTlTolbI',
@@ -1954,6 +2011,133 @@
     render();
   }
 
+  // ---------- Verkehrsmittel-Anbieter (ÖPV) — full CRUD like Adressen, minus geocoding ----------
+  function findCarrier(id) { return state.carriers.find(c => c.id === id); }
+
+  function bumpCarrierUsage(id) {
+    const c = findCarrier(id);
+    if (!c) return;
+    c.usageCount = (c.usageCount || 0) + 1;
+    c.lastUsedAt = nowIso();
+    saveKey('carriers');
+  }
+
+  function openCarrierPicker() {
+    const items = sortedByRecency(state.carriers).map(c => ({ ...c, __id: c.id }));
+    openPicker({
+      title: 'Verkehrsmittel wählen',
+      searchPlaceholder: 'Anbieter suchen oder neu eingeben',
+      items,
+      matches: (it, q) => it.name.toLowerCase().includes(q),
+      renderItem: (it) => ({ primary: it.name, secondary: '' }),
+      onSelect: (it) => { closeSheet(); draft.carrierId = it.id; render(); },
+      onCreate: (query) => {
+        const name = query.trim();
+        let carrier = state.carriers.find(c => c.name.toLowerCase() === name.toLowerCase());
+        if (!carrier) {
+          carrier = { id: uid(), name, usageCount: 0, lastUsedAt: null };
+          state.carriers.push(carrier);
+          saveKey('carriers');
+        }
+        closeSheet();
+        draft.carrierId = carrier.id;
+        render();
+      }
+    });
+  }
+
+  function openCarrierEditor(id) {
+    const carrier = findCarrier(id);
+    if (!carrier) return;
+    closeSheet();
+    const backdrop = document.createElement('div');
+    backdrop.id = 'sheet-backdrop';
+    backdrop.className = 'sheet-backdrop';
+    backdrop.innerHTML = `
+      <div class="sheet" role="dialog">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+          <h2>Verkehrsmittel bearbeiten</h2>
+          <button class="btn-text" id="sheet-close">Abbrechen</button>
+        </div>
+        <form id="edit-carrier-form" style="padding: 4px 18px 20px;">
+          <div class="field">
+            <label for="edit-carrier-name">Name</label>
+            <div class="text-input-wrap">
+              <input type="text" id="edit-carrier-name" value="${escapeHtml(carrier.name)}" placeholder="z. B. SSB, DB, Flixbus" enterkeyhint="done">
+              <button type="button" class="input-clear" data-clear-target="edit-carrier-name" aria-label="Eingabe löschen">×</button>
+            </div>
+          </div>
+          <button type="submit" class="btn-primary" id="edit-carrier-save" style="width:100%;">Speichern</button>
+        </form>
+      </div>
+    `;
+    appendSheet(backdrop);
+    backdrop.querySelector('#sheet-close').addEventListener('click', closeSheet);
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeSheet(); });
+    backdrop.querySelector('#edit-carrier-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const newName = backdrop.querySelector('#edit-carrier-name').value.trim();
+      if (!newName) { toast('Bitte einen Namen angeben'); return; }
+      carrier.name = newName;
+      saveKey('carriers');
+      closeSheet();
+      toast('Verkehrsmittel aktualisiert');
+      render();
+    });
+    setTimeout(() => backdrop.querySelector('#edit-carrier-name').focus(), 50);
+  }
+
+  function mergeCarriers(sourceId, targetId) {
+    for (const t of state.trips) {
+      if (t.carrierId === sourceId) t.carrierId = targetId;
+    }
+    saveKey('trips');
+    const source = findCarrier(sourceId);
+    const target = findCarrier(targetId);
+    if (source && target) {
+      target.usageCount = (target.usageCount || 0) + (source.usageCount || 0);
+      if (source.lastUsedAt && (!target.lastUsedAt || source.lastUsedAt > target.lastUsedAt)) {
+        target.lastUsedAt = source.lastUsedAt;
+      }
+    }
+    state.carriers = state.carriers.filter(c => c.id !== sourceId);
+    saveKey('carriers');
+  }
+
+  function openMergeCarrierPicker(sourceId) {
+    const source = findCarrier(sourceId);
+    if (!source) return;
+    const items = sortedByRecency(state.carriers)
+      .filter(c => c.id !== sourceId)
+      .map(c => ({ ...c, __id: c.id }));
+    if (!items.length) { toast('Kein weiteres Verkehrsmittel zum Zusammenführen vorhanden'); return; }
+    openPicker({
+      title: 'Mit welchem Verkehrsmittel zusammenführen?',
+      searchPlaceholder: 'Anbieter suchen',
+      items,
+      matches: (it, q) => it.name.toLowerCase().includes(q),
+      renderItem: (it) => ({ primary: it.name, secondary: '' }),
+      onSelect: async (it) => {
+        closeSheet();
+        const ok = await confirmDialog(`„${source.name}" mit „${it.name}" zusammenführen? Alle Reisen, die „${source.name}" nutzen, werden auf „${it.name}" umgestellt. „${source.name}" wird danach gelöscht.`, 'Zusammenführen');
+        if (!ok) return;
+        mergeCarriers(sourceId, it.id);
+        toast('Verkehrsmittel zusammengeführt');
+        render();
+      }
+    });
+  }
+
+  async function deleteCarrier(id) {
+    const ok = await confirmDialog('Dieses Verkehrsmittel löschen?');
+    if (!ok) return;
+    state.carriers = state.carriers.filter(c => c.id !== id);
+    saveKey('carriers');
+    toast('Verkehrsmittel gelöscht');
+    render();
+  }
+
   function addNoteSuggestion(text) {
     const trimmed = text.trim();
     if (!trimmed) { toast('Bitte einen Text angeben'); return; }
@@ -2077,6 +2261,8 @@
   function renderNewView() {
     const startLoc = draft.startLocationId ? findLocation(draft.startLocationId) : null;
     const endLoc = draft.endLocationId ? findLocation(draft.endLocationId) : null;
+    const isOepv = currentContext === 'immobilien' && draft.verkehrsmittel === 'oepv';
+    const carrier = draft.carrierId ? findCarrier(draft.carrierId) : null;
 
     return `
       <div class="section-title">${editingTripId ? 'Reise bearbeiten' : 'Neue Reise'}</div>
@@ -2102,10 +2288,11 @@
             <button type="button" class="icon-btn" id="btn-gps-end" title="Standort verwenden" aria-label="Standort verwenden">${PIN_ICON}</button>
           </div>
         </div>`}
+        ${!isOepv ? `
         <div class="field">
           <label>Entfernung</label>
           ${distanceBoxHtml(draft, 'retry-draft')}
-        </div>
+        </div>` : ''}
         <div class="field">
           <label>Start</label>
           <div class="two-col">
@@ -2126,6 +2313,15 @@
             </button>
           </div>
         </div>
+        ${currentContext === 'immobilien' ? `
+        <div class="field">
+          <label>Verkehrsmittel</label>
+          <div class="mode-switch">
+            <button type="button" class="${!isOepv ? 'active' : ''}" data-verkehrsmittel="kfz">Kfz</button>
+            <button type="button" class="${isOepv ? 'active' : ''}" data-verkehrsmittel="oepv">ÖPV</button>
+          </div>
+        </div>` : ''}
+        ${!isOepv ? `
         <div class="field">
           <label>${currentContext === 'immobilien' ? 'Kilometersatz' : 'Pendlerpauschale'}</label>
           ${rateBoxHtml(draft)}
@@ -2136,7 +2332,19 @@
             <span class="${draft.vehiclePlate ? '' : 'placeholder'}">${draft.vehiclePlate ? escapeHtml(draft.vehiclePlate) : 'Kennzeichen wählen'}</span>
             <span class="chev">›</span>
           </button>
+        </div>` : `
+        <div class="field">
+          <label>Anbieter</label>
+          <button class="picker-trigger" id="btn-pick-carrier">
+            <span class="${carrier ? '' : 'placeholder'}">${carrier ? escapeHtml(carrier.name) : 'Anbieter wählen'}</span>
+            <span class="chev">›</span>
+          </button>
         </div>
+        <div class="field">
+          <label>Ticketpreis (optional)</label>
+          <div class="input-suffix has-clear"><input type="text" inputmode="decimal" id="ticket-price-input" placeholder="0,00" value="${draft.ticketPrice != null ? escapeHtml(String(draft.ticketPrice).replace('.', ',')) : ''}"><button type="button" class="input-clear" data-clear-target="ticket-price-input" aria-label="Eingabe löschen">×</button><span class="suffix">€</span></div>
+          ${draft.ticketPrice == null ? '<div class="hint warn-text">Ticketpreis fehlt — Reise kann trotzdem gespeichert werden</div>' : ''}
+        </div>`}
         ${currentContext === 'immobilien' ? `
         <div class="field">
           <label>Objekt</label>
@@ -2181,9 +2389,24 @@
     });
     const addWaypointBtn = document.getElementById('btn-add-waypoint');
     if (addWaypointBtn) addWaypointBtn.addEventListener('click', addDraftWaypoint);
-    document.getElementById('btn-pick-vehicle').addEventListener('click', openVehiclePicker);
+    const pickVehicleBtn = document.getElementById('btn-pick-vehicle');
+    if (pickVehicleBtn) pickVehicleBtn.addEventListener('click', openVehiclePicker);
     const pickObjektBtn = document.getElementById('btn-pick-objekt');
     if (pickObjektBtn) pickObjektBtn.addEventListener('click', openObjektPicker);
+    document.querySelectorAll('[data-verkehrsmittel]').forEach((btn) => {
+      btn.addEventListener('click', () => setDraftVerkehrsmittel(btn.getAttribute('data-verkehrsmittel')));
+    });
+    const pickCarrierBtn = document.getElementById('btn-pick-carrier');
+    if (pickCarrierBtn) pickCarrierBtn.addEventListener('click', openCarrierPicker);
+    const ticketPriceEl = document.getElementById('ticket-price-input');
+    if (ticketPriceEl) {
+      ticketPriceEl.addEventListener('input', () => {
+        const val = parseFloat(ticketPriceEl.value.replace(',', '.'));
+        draft.ticketPrice = isNaN(val) ? null : val;
+        computeCost(draft);
+      });
+      ticketPriceEl.addEventListener('blur', render);
+    }
     document.getElementById('btn-save-trip').addEventListener('click', saveTrip);
     const cancelBtn = document.getElementById('btn-cancel-edit');
     if (cancelBtn) cancelBtn.addEventListener('click', cancelEdit);
@@ -2250,9 +2473,13 @@
       html += `<div class="section-title" style="display:flex; justify-content:space-between; align-items:baseline;"><span>${escapeHtml(year)}</span><span>${sumText}</span></div>`;
 
       for (const trip of tripsOfYear) {
-        const distText = trip.distanceStatus === 'ok'
-          ? `${trip.distanceKm} km${trip.cost != null ? ' · ' + formatEuro(trip.cost) : ''}`
-          : (trip.distanceStatus === 'pending' ? '…' : '');
+        const isOepvTrip = trip.context === 'immobilien' && trip.verkehrsmittel === 'oepv';
+        const distText = isOepvTrip
+          ? (trip.cost != null ? formatEuro(trip.cost) : '')
+          : (trip.distanceStatus === 'ok'
+              ? `${trip.distanceKm} km${trip.cost != null ? ' · ' + formatEuro(trip.cost) : ''}`
+              : (trip.distanceStatus === 'pending' ? '…' : ''));
+        const carrier = isOepvTrip ? findCarrier(trip.carrierId) : null;
         html += `
           <div class="trip-card">
             <div class="trip-row-top">
@@ -2262,11 +2489,14 @@
             <div class="trip-meta">${formatDateTime(trip.startDateTime)}${trip.endDateTime ? ' – ' + formatDateTime(trip.endDateTime) : ' · <span class="warn-text">keine Rückkehrzeit</span>'}</div>
             ${formatDuration(trip.startDateTime, trip.endDateTime) ? `<div class="trip-meta">Dauer: ${escapeHtml(formatDuration(trip.startDateTime, trip.endDateTime))}</div>` : ''}
             ${trip.context === 'immobilien' && trip.objektKuerzel ? `<div class="trip-meta">Objekt: ${escapeHtml(trip.objektKuerzel)}</div>` : ''}
-            <div class="trip-meta">${escapeHtml(trip.vehiclePlate)}${trip.ratePerKm != null ? ' · ' + formatEuroPerKm(trip.ratePerKm) : ''}</div>
+            ${isOepvTrip
+              ? `<div class="trip-meta">${carrier ? escapeHtml(carrier.name) : '<span class="warn-text">gelöschtes Verkehrsmittel</span>'}${trip.ticketPrice != null ? ' · ' + formatEuro(trip.ticketPrice) : ''}</div>`
+              : `<div class="trip-meta">${escapeHtml(trip.vehiclePlate)}${trip.ratePerKm != null ? ' · ' + formatEuroPerKm(trip.ratePerKm) : ''}</div>`}
             ${trip.note ? `<div class="trip-note">${escapeHtml(trip.note)}</div>` : ''}
             ${trip.distanceStatus === 'pending' ? `<div class="hint">${escapeHtml(trip.distanceError || 'Distanz wird nachgeholt, sobald Internet verfügbar ist.')}</div>` : ''}
             ${(trip.context || 'pendeln') === 'pendeln' && trip.distanceStatus === 'ok' && trip.cost == null ? `<div class="hint">Keine Pendlerpauschale für dieses Datum hinterlegt.</div>` : ''}
-            ${trip.context === 'immobilien' && trip.distanceStatus === 'ok' && trip.cost == null ? `<div class="hint">Kein Kilometersatz für dieses Datum hinterlegt.</div>` : ''}
+            ${trip.context === 'immobilien' && !isOepvTrip && trip.distanceStatus === 'ok' && trip.cost == null ? `<div class="hint">Kein Kilometersatz für dieses Datum hinterlegt.</div>` : ''}
+            ${isOepvTrip && trip.ticketPrice == null ? `<div class="hint warn-text">Ticketpreis fehlt</div>` : ''}
             ${tripLocationIds(trip).map((id) => findLocation(id)).some(l => l && isUnverifiedLocation(l)) ? `<div class="hint warn-text">Manuell erfasste Adresse — bitte Genauigkeit prüfen</div>` : ''}
             <div class="trip-actions">
               <button class="btn-text" data-edit="${escapeHtml(trip.id)}">Bearbeiten</button>
@@ -2324,6 +2554,18 @@
           <button class="btn-danger" data-del-obj="${escapeHtml(o.kuerzel)}">Löschen</button>
         </div>`).join('')
       : `<div class="hint">Noch keine Objekte gespeichert.</div>`;
+
+    const carrierRows = state.carriers.length
+      ? sortedByRecency(state.carriers).map(c => `
+        <div class="manage-row">
+          <div>${escapeHtml(c.name)}</div>
+          <div style="display:flex; gap:16px;">
+            <button class="btn-text" data-edit-carrier="${escapeHtml(c.id)}">Bearbeiten</button>
+            <button class="btn-text" data-merge-carrier="${escapeHtml(c.id)}">Zusammenführen</button>
+            <button class="btn-danger" data-del-carrier="${escapeHtml(c.id)}">Löschen</button>
+          </div>
+        </div>`).join('')
+      : `<div class="hint">Noch keine Verkehrsmittel gespeichert.</div>`;
 
     const suggestionRows = state.noteSuggestions.length
       ? state.noteSuggestions.map(s => `
@@ -2438,6 +2680,9 @@
       <div class="section-title">Gespeicherte Objekte</div>
       <div class="card">${objRows}</div>
 
+      <div class="section-title">Verkehrsmittel-Anbieter</div>
+      <div class="card">${carrierRows}</div>
+
       <div class="section-title">Kilometersatz (Immobilien)</div>
       <div class="card">
         ${immoRateRows}
@@ -2505,6 +2750,15 @@
     });
     document.querySelectorAll('[data-del-obj]').forEach(btn => {
       btn.addEventListener('click', () => deleteObjekt(btn.getAttribute('data-del-obj')));
+    });
+    document.querySelectorAll('[data-edit-carrier]').forEach(btn => {
+      btn.addEventListener('click', () => openCarrierEditor(btn.getAttribute('data-edit-carrier')));
+    });
+    document.querySelectorAll('[data-merge-carrier]').forEach(btn => {
+      btn.addEventListener('click', () => openMergeCarrierPicker(btn.getAttribute('data-merge-carrier')));
+    });
+    document.querySelectorAll('[data-del-carrier]').forEach(btn => {
+      btn.addEventListener('click', () => deleteCarrier(btn.getAttribute('data-del-carrier')));
     });
     const addSuggestionBtn = document.getElementById('btn-add-suggestion');
     if (addSuggestionBtn) {

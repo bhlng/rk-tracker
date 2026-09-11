@@ -358,6 +358,30 @@ button {
 
 .chip-suggestion:active { background: var(--bg-elevated); }
 
+.mode-switch {
+  display: flex;
+  gap: 8px;
+}
+
+.mode-switch button {
+  flex: 1;
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 10px;
+  border-radius: var(--radius-md);
+  transition: background-color .15s ease, color .15s ease, border-color .15s ease;
+}
+
+.mode-switch button.active {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent);
+}
+
 .picker-trigger {
   width: 100%;
   text-align: left;
