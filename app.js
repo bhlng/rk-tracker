@@ -1,21 +1,28 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.3.0';
+  const APP_VERSION = '3.5.0';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
-  const IMMO_NOTE_SUGGESTIONS = ['Wohnungsübergabe', 'Wohnungsbesichtigung', 'Ankaufs-Besichtigung'];
 
   const DEFAULTS = {
     trips: [],
     locations: [],
     vehicles: [],
     objekte: [],
+    noteSuggestions: [
+      { id: 'default-1', text: 'Wohnungsübergabe' },
+      { id: 'default-2', text: 'Wohnungsbesichtigung' },
+      { id: 'default-3', text: 'Ankaufs-Besichtigung' }
+    ],
     routeCache: {},
     rates: [],
+    immoRates: [],
     settings: { orsApiKey: '', homeLocationId: null, workLocationId: null }
   };
+
+  const RATE_TYPE_LABELS = { pauschal: 'Pauschal', tatsaechlich: 'Tatsächliche Kosten', tabelle: 'Tabelle' };
 
   function loadKey(key) {
     try {
@@ -38,8 +45,10 @@
     locations: loadKey('locations'),
     vehicles: loadKey('vehicles'),
     objekte: loadKey('objekte'),
+    noteSuggestions: loadKey('noteSuggestions'),
     routeCache: loadKey('routeCache'),
     rates: loadKey('rates'),
+    immoRates: loadKey('immoRates'),
     settings: loadKey('settings')
   };
 
@@ -75,6 +84,7 @@
       note: '',
       ratePerKm: null,
       rateSource: 'auto', // auto | manual
+      rateType: null, // Immobilien only: pauschal | tatsaechlich | tabelle
       cost: null
     };
     computeCost(d);
@@ -340,10 +350,10 @@
   }
 
   // ---------- Kilometersatz / Kosten ----------
-  function findApplicableRate(dateTimeStr) {
+  function findApplicableRate(dateTimeStr, ratesArray = state.rates) {
     const day = (dateTimeStr || '').slice(0, 10);
     if (!day) return null;
-    const sorted = [...state.rates].sort((a, b) => a.validFrom.localeCompare(b.validFrom));
+    const sorted = [...ratesArray].sort((a, b) => a.validFrom.localeCompare(b.validFrom));
     let applicable = null;
     for (const r of sorted) {
       if (r.validFrom <= day) applicable = r; else break;
@@ -352,16 +362,16 @@
   }
 
   // Mutates `entry` (a trip or the draft): resolves ratePerKm (unless manually overridden)
-  // and (re)computes cost from the current distanceKm. Safe to call any time.
+  // and (re)computes cost from the current distanceKm. Safe to call any time. Pendeln and
+  // Immobilien keep separate, independent rate histories (state.rates / state.immoRates).
   function computeCost(entry) {
-    if (entry.context === 'immobilien') {
-      entry.cost = null; // Immobilien-Kilometersatz folgt in einer späteren Phase
-      return;
-    }
+    const isImmo = entry.context === 'immobilien';
+    const ratesArray = isImmo ? state.immoRates : state.rates;
     if (entry.rateSource !== 'manual') {
-      const r = findApplicableRate(entry.startDateTime);
+      const r = findApplicableRate(entry.startDateTime, ratesArray);
       entry.ratePerKm = r ? r.amount : null;
       entry.rateSource = 'auto';
+      if (isImmo) entry.rateType = r ? r.rateType : null;
     }
     if (entry.distanceStatus === 'ok' && entry.distanceKm != null && entry.ratePerKm != null) {
       entry.cost = Math.round(entry.distanceKm * entry.ratePerKm * 100) / 100;
@@ -370,13 +380,14 @@
     }
   }
 
-  // Trips whose auto-resolved rate changes because of `rate` (already inserted into state.rates).
-  function affectedTripsForRate(rate) {
-    const sorted = [...state.rates].sort((a, b) => a.validFrom.localeCompare(b.validFrom));
+  // Trips whose auto-resolved rate changes because of `rate` (already inserted into ratesArray).
+  function affectedTripsForRate(rate, ratesArray, context) {
+    const sorted = [...ratesArray].sort((a, b) => a.validFrom.localeCompare(b.validFrom));
     const idx = sorted.findIndex(r => r.id === rate.id);
     const windowStart = rate.validFrom;
     const windowEnd = sorted[idx + 1] ? sorted[idx + 1].validFrom : null;
     return state.trips.filter(t => {
+      if ((t.context || 'pendeln') !== context) return false;
       if (t.rateSource === 'manual') return false; // missing rateSource (older trips) counts as auto
       const day = (t.startDateTime || '').slice(0, 10);
       if (!day || day < windowStart) return false;
@@ -397,7 +408,7 @@
     if (existingIdx >= 0) state.rates[existingIdx] = rate; else state.rates.push(rate);
     saveKey('rates');
 
-    const affected = affectedTripsForRate(rate);
+    const affected = affectedTripsForRate(rate, state.rates, 'pendeln');
     if (affected.length) {
       const n = affected.length;
       const msg = `${n} bereits erfasste ${n === 1 ? 'Fahrt fällt' : 'Fahrten fallen'} in den Zeitraum ab ${formatDateOnly(dateVal)}. Auf ${formatEuroPerKm(amountVal)} aktualisieren?`;
@@ -421,7 +432,50 @@
     state.rates = state.rates.filter(r => r.id !== id);
     saveKey('rates');
     for (const t of state.trips) {
-      if (t.rateSource === 'auto') computeCost(t);
+      if ((t.context || 'pendeln') === 'pendeln' && t.rateSource === 'auto') computeCost(t);
+    }
+    saveKey('trips');
+    render();
+  }
+
+  async function addImmoRate() {
+    const dateVal = document.getElementById('new-immo-rate-date').value;
+    const amountVal = parseFloat(document.getElementById('new-immo-rate-amount').value.replace(',', '.'));
+    const rateType = document.getElementById('new-immo-rate-type').value;
+    if (!dateVal || isNaN(amountVal) || amountVal <= 0) {
+      toast('Bitte gültiges Datum und Betrag angeben');
+      return;
+    }
+    const existingIdx = state.immoRates.findIndex(r => r.validFrom === dateVal);
+    const rate = { id: existingIdx >= 0 ? state.immoRates[existingIdx].id : uid(), validFrom: dateVal, amount: amountVal, rateType };
+    if (existingIdx >= 0) state.immoRates[existingIdx] = rate; else state.immoRates.push(rate);
+    saveKey('immoRates');
+
+    const affected = affectedTripsForRate(rate, state.immoRates, 'immobilien');
+    if (affected.length) {
+      const n = affected.length;
+      const msg = `${n} bereits erfasste ${n === 1 ? 'Fahrt fällt' : 'Fahrten fallen'} in den Zeitraum ab ${formatDateOnly(dateVal)}. Auf ${formatEuroPerKm(amountVal)} aktualisieren?`;
+      const ok = await confirmDialog(msg, 'Aktualisieren');
+      for (const t of affected) {
+        if (ok) {
+          computeCost(t);
+        } else {
+          t.rateSource = 'manual';
+        }
+      }
+      saveKey('trips');
+    }
+    toast('Kilometersatz gespeichert');
+    render();
+  }
+
+  async function deleteImmoRate(id) {
+    const ok = await confirmDialog('Diesen Kilometersatz löschen?');
+    if (!ok) return;
+    state.immoRates = state.immoRates.filter(r => r.id !== id);
+    saveKey('immoRates');
+    for (const t of state.trips) {
+      if ((t.context || 'pendeln') === 'immobilien' && t.rateSource === 'auto') computeCost(t);
     }
     saveKey('trips');
     render();
@@ -713,6 +767,7 @@
         note: draft.note,
         ratePerKm: draft.ratePerKm,
         rateSource: draft.rateSource,
+        rateType: draft.rateType || null,
         updatedAt: nowIso()
       });
       if (routeChanged) {
@@ -745,6 +800,7 @@
         note: draft.note,
         ratePerKm: draft.ratePerKm,
         rateSource: draft.rateSource,
+        rateType: draft.rateType || null,
         cost: draft.cost,
         createdAt: nowIso(),
         updatedAt: nowIso()
@@ -784,6 +840,7 @@
       note: trip.note,
       ratePerKm: trip.ratePerKm != null ? trip.ratePerKm : null,
       rateSource: trip.rateSource || 'auto',
+      rateType: trip.rateType || null,
       cost: trip.cost != null ? trip.cost : null
     };
     currentView = 'new';
@@ -1276,7 +1333,8 @@
     });
   }
 
-  function openRateEditor() {
+  function openRateEditor(opts) {
+    const isImmo = !!(opts && opts.immo);
     closeSheet();
     const backdrop = document.createElement('div');
     backdrop.id = 'sheet-backdrop';
@@ -1286,7 +1344,7 @@
       <div class="sheet" role="dialog">
         <div class="sheet-handle"></div>
         <div class="sheet-header">
-          <h2>Pendlerpauschale für diese Fahrt</h2>
+          <h2>${isImmo ? 'Kilometersatz für diese Fahrt' : 'Pendlerpauschale für diese Fahrt'}</h2>
           <button class="btn-text" id="sheet-close">Abbrechen</button>
         </div>
         <form id="rate-form" style="padding: 4px 18px 20px;">
@@ -1294,6 +1352,15 @@
             <label for="rate-amount-input">Betrag pro Kilometer</label>
             <div class="input-suffix has-clear"><input type="text" inputmode="decimal" id="rate-amount-input" placeholder="0,40" value="${escapeHtml(currentVal)}" enterkeyhint="done"><button type="button" class="input-clear" data-clear-target="rate-amount-input" aria-label="Eingabe löschen">×</button><span class="suffix">€/km</span></div>
           </div>
+          ${isImmo ? `
+          <div class="field">
+            <label for="rate-type-input">Art</label>
+            <select id="rate-type-input">
+              <option value="pauschal" ${draft.rateType === 'pauschal' ? 'selected' : ''}>Pauschal</option>
+              <option value="tatsaechlich" ${draft.rateType === 'tatsaechlich' ? 'selected' : ''}>Tatsächliche Kosten</option>
+              <option value="tabelle" ${draft.rateType === 'tabelle' ? 'selected' : ''}>Tabelle</option>
+            </select>
+          </div>` : ''}
           <button type="submit" class="btn-primary" id="rate-save">Speichern</button>
           ${draft.rateSource === 'manual' ? '<button type="button" class="btn-secondary" id="rate-reset" style="width:100%;margin-top:10px;">Automatisch verwenden</button>' : ''}
         </form>
@@ -1308,6 +1375,7 @@
       if (isNaN(val) || val <= 0) { toast('Bitte einen gültigen Betrag angeben'); return; }
       draft.ratePerKm = val;
       draft.rateSource = 'manual';
+      if (isImmo) draft.rateType = backdrop.querySelector('#rate-type-input').value;
       computeCost(draft);
       closeSheet();
       render();
@@ -1333,7 +1401,9 @@
       locations: state.locations,
       vehicles: state.vehicles,
       objekte: state.objekte,
+      noteSuggestions: state.noteSuggestions,
       rates: state.rates,
+      immoRates: state.immoRates,
       routeCache: state.routeCache,
       settings: state.settings
     };
@@ -1353,7 +1423,7 @@
 
   async function importBackupFile(file) {
     const cloudNote = currentUser ? ' Da du angemeldet bist, wird dies auch mit all deinen anderen angemeldeten Geräten synchronisiert.' : '';
-    const ok = await confirmDialog(`Dies ersetzt ALLE aktuellen Daten (Reisen, Adressen, Fahrzeuge, Objekte, Sätze, API-Key) durch den Inhalt der Backup-Datei.${cloudNote} Fortfahren?`, 'Ersetzen');
+    const ok = await confirmDialog(`Dies ersetzt ALLE aktuellen Daten (Reisen, Adressen, Fahrzeuge, Objekte, Anlass-Vorschläge, Sätze, API-Key) durch den Inhalt der Backup-Datei.${cloudNote} Fortfahren?`, 'Ersetzen');
     if (!ok) return;
     try {
       const text = await file.text();
@@ -1363,14 +1433,18 @@
       state.locations = Array.isArray(data.locations) ? data.locations : [];
       state.vehicles = Array.isArray(data.vehicles) ? data.vehicles : [];
       state.objekte = Array.isArray(data.objekte) ? data.objekte : [];
+      state.noteSuggestions = Array.isArray(data.noteSuggestions) ? data.noteSuggestions : JSON.parse(JSON.stringify(DEFAULTS.noteSuggestions));
       state.rates = Array.isArray(data.rates) ? data.rates : [];
+      state.immoRates = Array.isArray(data.immoRates) ? data.immoRates : [];
       state.routeCache = (data.routeCache && typeof data.routeCache === 'object') ? data.routeCache : {};
       state.settings = (data.settings && typeof data.settings === 'object') ? data.settings : { orsApiKey: '' };
       saveKey('trips');
       saveKey('locations');
       saveKey('vehicles');
       saveKey('objekte');
+      saveKey('noteSuggestions');
       saveKey('rates');
+      saveKey('immoRates');
       saveKey('routeCache');
       saveKey('settings');
       toast('Backup importiert');
@@ -1381,7 +1455,7 @@
   }
 
   // ---------- Cloud sync (Firebase) ----------
-  const CLOUD_SYNCED_KEYS = ['trips', 'locations', 'vehicles', 'objekte', 'rates', 'settings']; // not routeCache: regenerable, no data-loss risk
+  const CLOUD_SYNCED_KEYS = ['trips', 'locations', 'vehicles', 'objekte', 'noteSuggestions', 'rates', 'immoRates', 'settings']; // not routeCache: regenerable, no data-loss risk
 
   const firebaseConfig = {
     apiKey: 'AIzaSyDLfAXQUAWnv31czdwS_u4OZ_FnTlTolbI',
@@ -1695,6 +1769,70 @@
     render();
   }
 
+  function addNoteSuggestion(text) {
+    const trimmed = text.trim();
+    if (!trimmed) { toast('Bitte einen Text angeben'); return; }
+    if (state.noteSuggestions.some(s => s.text.toLowerCase() === trimmed.toLowerCase())) {
+      toast('Dieser Vorschlag ist bereits gespeichert');
+      return;
+    }
+    state.noteSuggestions.push({ id: uid(), text: trimmed });
+    saveKey('noteSuggestions');
+    toast('Vorschlag gespeichert');
+    render();
+  }
+
+  function openNoteSuggestionEditor(id) {
+    const suggestion = state.noteSuggestions.find(s => s.id === id);
+    if (!suggestion) return;
+    closeSheet();
+    const backdrop = document.createElement('div');
+    backdrop.id = 'sheet-backdrop';
+    backdrop.className = 'sheet-backdrop';
+    backdrop.innerHTML = `
+      <div class="sheet" role="dialog">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+          <h2>Anlass-Vorschlag bearbeiten</h2>
+          <button class="btn-text" id="sheet-close">Abbrechen</button>
+        </div>
+        <form id="edit-suggestion-form" style="padding: 4px 18px 20px;">
+          <div class="field">
+            <label for="edit-suggestion-input">Text</label>
+            <div class="text-input-wrap">
+              <input type="text" id="edit-suggestion-input" value="${escapeHtml(suggestion.text)}" maxlength="80" enterkeyhint="done">
+              <button type="button" class="input-clear" data-clear-target="edit-suggestion-input" aria-label="Eingabe löschen">×</button>
+            </div>
+          </div>
+          <button type="submit" class="btn-primary" id="edit-suggestion-save" style="width:100%;">Speichern</button>
+        </form>
+      </div>
+    `;
+    appendSheet(backdrop);
+    backdrop.querySelector('#sheet-close').addEventListener('click', closeSheet);
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeSheet(); });
+    backdrop.querySelector('#edit-suggestion-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const newText = backdrop.querySelector('#edit-suggestion-input').value.trim();
+      if (!newText) { toast('Bitte einen Text angeben'); return; }
+      suggestion.text = newText;
+      saveKey('noteSuggestions');
+      closeSheet();
+      toast('Vorschlag aktualisiert');
+      render();
+    });
+    setTimeout(() => backdrop.querySelector('#edit-suggestion-input').focus(), 50);
+  }
+
+  async function deleteNoteSuggestion(id) {
+    const ok = await confirmDialog('Diesen Anlass-Vorschlag löschen?');
+    if (!ok) return;
+    state.noteSuggestions = state.noteSuggestions.filter(s => s.id !== id);
+    saveKey('noteSuggestions');
+    toast('Vorschlag gelöscht');
+    render();
+  }
+
   // ---------- Views ----------
   function distanceBoxHtml(entry, retryAction) {
     if (!entry.startLocationId || !entry.endLocationId) {
@@ -1713,8 +1851,9 @@
   }
 
   function rateBoxHtml(entry) {
+    const typeTag = entry.context === 'immobilien' && entry.rateType ? ` · ${RATE_TYPE_LABELS[entry.rateType] || entry.rateType}` : '';
     const label = entry.ratePerKm != null
-      ? `${formatEuroPerKm(entry.ratePerKm)} <span class="hint" style="margin:0;display:inline;">(${entry.rateSource === 'manual' ? 'manuell' : 'automatisch'})</span>`
+      ? `${formatEuroPerKm(entry.ratePerKm)} <span class="hint" style="margin:0;display:inline;">(${entry.rateSource === 'manual' ? 'manuell' : 'automatisch'}${typeTag})</span>`
       : '<span class="placeholder">Kein Satz hinterlegt</span>';
     const costLine = entry.cost != null ? `<div class="hint">Kosten dieser Fahrt: ${formatEuro(entry.cost)}</div>` : '';
     return `<div class="distance-box">
@@ -1774,11 +1913,10 @@
             </button>
           </div>
         </div>
-        ${currentContext === 'pendeln' ? `
         <div class="field">
-          <label>Pendlerpauschale</label>
+          <label>${currentContext === 'immobilien' ? 'Kilometersatz' : 'Pendlerpauschale'}</label>
           ${rateBoxHtml(draft)}
-        </div>` : ''}
+        </div>
         <div class="field">
           <label>Fahrzeug</label>
           <button class="picker-trigger" id="btn-pick-vehicle">
@@ -1796,9 +1934,9 @@
         </div>` : ''}
         <div class="field">
           <label>${currentContext === 'immobilien' ? 'Anlass (optional)' : 'Notiz (optional)'}</label>
-          ${currentContext === 'immobilien' ? `
+          ${currentContext === 'immobilien' && state.noteSuggestions.length ? `
           <div class="chip-row">
-            ${IMMO_NOTE_SUGGESTIONS.map(s => `<button type="button" class="chip-suggestion" data-note-suggestion="${escapeHtml(s)}">${escapeHtml(s)}</button>`).join('')}
+            ${state.noteSuggestions.map(s => `<button type="button" class="chip-suggestion" data-note-suggestion="${escapeHtml(s.text)}">${escapeHtml(s.text)}</button>`).join('')}
           </div>` : ''}
           <div class="text-input-wrap textarea-wrap">
             <textarea id="input-note" maxlength="1000" placeholder="z. B. Anlass der Reise">${escapeHtml(draft.note)}</textarea>
@@ -1840,7 +1978,7 @@
     });
     document.getElementById('btn-pick-end-time').addEventListener('click', () => openTimeEditor('end'));
     const editRateBtn = document.getElementById('btn-edit-rate');
-    if (editRateBtn) editRateBtn.addEventListener('click', openRateEditor);
+    if (editRateBtn) editRateBtn.addEventListener('click', () => openRateEditor({ immo: currentContext === 'immobilien' }));
     const noteEl = document.getElementById('input-note');
     noteEl.addEventListener('input', (e) => {
       draft.note = e.target.value;
@@ -1896,12 +2034,14 @@
               <span class="trip-route">${locationLabelHtml(trip.startLocationId)} → ${locationLabelHtml(trip.endLocationId)}</span>
               <span class="trip-km">${distText}</span>
             </div>
-            <div class="trip-meta">${formatDateTime(trip.startDateTime)}${trip.endDateTime ? ' – ' + formatDateTime(trip.endDateTime) : ' · <span class="warn-text">keine Rückkehrzeit</span>'}${formatDuration(trip.startDateTime, trip.endDateTime) ? ' · ' + escapeHtml(formatDuration(trip.startDateTime, trip.endDateTime)) : ''}</div>
+            <div class="trip-meta">${formatDateTime(trip.startDateTime)}${trip.endDateTime ? ' – ' + formatDateTime(trip.endDateTime) : ' · <span class="warn-text">keine Rückkehrzeit</span>'}</div>
+            ${formatDuration(trip.startDateTime, trip.endDateTime) ? `<div class="trip-meta">Dauer: ${escapeHtml(formatDuration(trip.startDateTime, trip.endDateTime))}</div>` : ''}
             ${trip.context === 'immobilien' && trip.objektKuerzel ? `<div class="trip-meta">Objekt: ${escapeHtml(trip.objektKuerzel)}</div>` : ''}
             <div class="trip-meta">${escapeHtml(trip.vehiclePlate)}${trip.ratePerKm != null ? ' · ' + formatEuroPerKm(trip.ratePerKm) : ''}</div>
             ${trip.note ? `<div class="trip-note">${escapeHtml(trip.note)}</div>` : ''}
             ${trip.distanceStatus === 'pending' ? `<div class="hint">${escapeHtml(trip.distanceError || 'Distanz wird nachgeholt, sobald Internet verfügbar ist.')}</div>` : ''}
             ${(trip.context || 'pendeln') === 'pendeln' && trip.distanceStatus === 'ok' && trip.cost == null ? `<div class="hint">Keine Pendlerpauschale für dieses Datum hinterlegt.</div>` : ''}
+            ${trip.context === 'immobilien' && trip.distanceStatus === 'ok' && trip.cost == null ? `<div class="hint">Kein Kilometersatz für dieses Datum hinterlegt.</div>` : ''}
             ${[findLocation(trip.startLocationId), findLocation(trip.endLocationId)].some(l => l && isUnverifiedLocation(l)) ? `<div class="hint warn-text">Manuell erfasste Adresse — bitte Genauigkeit prüfen</div>` : ''}
             <div class="trip-actions">
               <button class="btn-text" data-edit="${escapeHtml(trip.id)}">Bearbeiten</button>
@@ -1960,6 +2100,17 @@
         </div>`).join('')
       : `<div class="hint">Noch keine Objekte gespeichert.</div>`;
 
+    const suggestionRows = state.noteSuggestions.length
+      ? state.noteSuggestions.map(s => `
+        <div class="manage-row">
+          <div>${escapeHtml(s.text)}</div>
+          <div style="display:flex; gap:16px;">
+            <button class="btn-text" data-edit-suggestion="${escapeHtml(s.id)}">Bearbeiten</button>
+            <button class="btn-danger" data-del-suggestion="${escapeHtml(s.id)}">Löschen</button>
+          </div>
+        </div>`).join('')
+      : `<div class="hint">Noch keine Anlass-Vorschläge gespeichert.</div>`;
+
     const rateRows = state.rates.length
       ? [...state.rates].sort((a, b) => b.validFrom.localeCompare(a.validFrom)).map(r => `
         <div class="manage-row">
@@ -1967,6 +2118,14 @@
           <button class="btn-danger" data-del-rate="${escapeHtml(r.id)}">Löschen</button>
         </div>`).join('')
       : `<div class="hint">Noch keine Pendlerpauschale hinterlegt. Ohne Satz werden keine Kosten berechnet.</div>`;
+
+    const immoRateRows = state.immoRates.length
+      ? [...state.immoRates].sort((a, b) => b.validFrom.localeCompare(a.validFrom)).map(r => `
+        <div class="manage-row">
+          <div>ab ${formatDateOnly(r.validFrom)} <span class="sub">${formatEuroPerKm(r.amount)} · ${escapeHtml(RATE_TYPE_LABELS[r.rateType] || r.rateType)}</span></div>
+          <button class="btn-danger" data-del-immo-rate="${escapeHtml(r.id)}">Löschen</button>
+        </div>`).join('')
+      : `<div class="hint">Noch kein Kilometersatz hinterlegt. Ohne Satz werden keine Kosten berechnet.</div>`;
 
     const homeLoc = state.settings.homeLocationId ? findLocation(state.settings.homeLocationId) : null;
     const workLoc = state.settings.workLocationId ? findLocation(state.settings.workLocationId) : null;
@@ -2052,7 +2211,42 @@
 
       ${currentContext === 'immobilien' ? `
       <div class="section-title">Gespeicherte Objekte</div>
-      <div class="card">${objRows}</div>` : ''}
+      <div class="card">${objRows}</div>
+
+      <div class="section-title">Kilometersatz (Immobilien)</div>
+      <div class="card">
+        ${immoRateRows}
+        <div class="field" style="margin-top:16px;">
+          <label>Neuer Satz</label>
+          <div class="two-col">
+            <input type="date" id="new-immo-rate-date" value="${escapeHtml(todayDateStr())}">
+            <div class="input-suffix"><input type="text" inputmode="decimal" id="new-immo-rate-amount" placeholder="0,40"><span class="suffix">€/km</span></div>
+          </div>
+          <div class="field" style="margin-top:10px;">
+            <label for="new-immo-rate-type">Art</label>
+            <select id="new-immo-rate-type">
+              <option value="pauschal">Pauschal</option>
+              <option value="tatsaechlich">Tatsächliche Kosten</option>
+              <option value="tabelle">Tabelle</option>
+            </select>
+          </div>
+          <div class="hint">Betrag in Euro pro Kilometer, gültig ab dem gewählten Datum. Alle drei Arten funktionieren aktuell technisch gleich (manueller Betrag) — die Unterscheidung bereitet spätere automatische Berechnung vor.</div>
+        </div>
+        <button class="btn-secondary" id="btn-add-immo-rate">Satz speichern</button>
+      </div>
+
+      <div class="section-title">Anlass-Vorschläge</div>
+      <div class="card">
+        ${suggestionRows}
+        <div class="field" style="margin-top:16px;">
+          <label>Neuer Vorschlag</label>
+          <div class="text-input-wrap">
+            <input type="text" id="new-suggestion-input" placeholder="z. B. Rücknahme" maxlength="80">
+            <button type="button" class="input-clear" data-clear-target="new-suggestion-input" aria-label="Eingabe löschen">×</button>
+          </div>
+        </div>
+        <button class="btn-secondary" id="btn-add-suggestion">Vorschlag speichern</button>
+      </div>` : ''}
 
       <div class="hint" style="margin-top:18px; padding: 0 4px;">${currentUser ? 'Deine Daten werden mit deinem Google-Konto synchronisiert und stehen auf all deinen angemeldeten Geräten zur Verfügung.' : 'Alle Daten (Reisen, Adressen, Fahrzeuge) liegen ausschließlich lokal in diesem Browser auf diesem Gerät. Mit Cloud-Synchronisation (oben) stehen sie auch auf deinen anderen Geräten zur Verfügung.'}</div>
     `;
@@ -2087,10 +2281,28 @@
     document.querySelectorAll('[data-del-obj]').forEach(btn => {
       btn.addEventListener('click', () => deleteObjekt(btn.getAttribute('data-del-obj')));
     });
+    const addSuggestionBtn = document.getElementById('btn-add-suggestion');
+    if (addSuggestionBtn) {
+      addSuggestionBtn.addEventListener('click', () => {
+        const input = document.getElementById('new-suggestion-input');
+        addNoteSuggestion(input.value);
+      });
+    }
+    document.querySelectorAll('[data-edit-suggestion]').forEach(btn => {
+      btn.addEventListener('click', () => openNoteSuggestionEditor(btn.getAttribute('data-edit-suggestion')));
+    });
+    document.querySelectorAll('[data-del-suggestion]').forEach(btn => {
+      btn.addEventListener('click', () => deleteNoteSuggestion(btn.getAttribute('data-del-suggestion')));
+    });
     const addRateBtn = document.getElementById('btn-add-rate');
     if (addRateBtn) addRateBtn.addEventListener('click', addRate);
     document.querySelectorAll('[data-del-rate]').forEach(btn => {
       btn.addEventListener('click', () => deleteRate(btn.getAttribute('data-del-rate')));
+    });
+    const addImmoRateBtn = document.getElementById('btn-add-immo-rate');
+    if (addImmoRateBtn) addImmoRateBtn.addEventListener('click', addImmoRate);
+    document.querySelectorAll('[data-del-immo-rate]').forEach(btn => {
+      btn.addEventListener('click', () => deleteImmoRate(btn.getAttribute('data-del-immo-rate')));
     });
     const pickHomeBtn = document.getElementById('btn-pick-home');
     if (pickHomeBtn) pickHomeBtn.addEventListener('click', () => openAddressSearch('settings-home'));
