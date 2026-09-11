@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.6.1';
+  const APP_VERSION = '3.6.2';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -765,14 +765,17 @@
   }
 
   function addDraftWaypoint() {
-    if (draft.waypoints.length === 2 && draft.waypoints[0]) {
-      // First extra stop: the trip likely loops back to Start, so prefill
-      // Ziel with a copy of it instead of leaving both new/old slots empty —
-      // still just one tap away from changing or removing.
-      draft.waypoints.splice(1, 0, null);
+    // A new stop always slots in right before Ziel — Ziel itself is never
+    // moved or overwritten, so an already-entered destination is never lost
+    // and never needs retyping. Exception: if Ziel hasn't been filled in
+    // yet, prefill it with a copy of Start (the trip commonly loops back to
+    // where it started) instead of leaving two empty slots — still just one
+    // tap away from changing.
+    const lastIdx = draft.waypoints.length - 1;
+    const zielEmpty = !draft.waypoints[lastIdx];
+    draft.waypoints.splice(lastIdx, 0, null);
+    if (zielEmpty && draft.waypoints[0]) {
       draft.waypoints[draft.waypoints.length - 1] = draft.waypoints[0];
-    } else {
-      draft.waypoints.push(null);
     }
     draft.distanceKm = null;
     draft.distanceStatus = 'empty';
@@ -2066,7 +2069,7 @@
           </div>
         </div>`;
     }).join('') + `
-        <button type="button" class="btn-text" id="btn-add-waypoint" style="margin: 4px 0 12px 4px;">+ Zwischenstopp</button>`;
+        <button type="button" class="btn-text" id="btn-add-waypoint" style="margin: 4px 0 12px 4px;">+ Nächster Stopp</button>`;
   }
 
   function renderNewView() {
