@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.7.1';
+  const APP_VERSION = '3.7.3';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -2494,8 +2494,8 @@
               : `<div class="trip-meta">${escapeHtml(trip.vehiclePlate)}${trip.ratePerKm != null ? ' · ' + formatEuroPerKm(trip.ratePerKm) : ''}</div>`}
             ${trip.note ? `<div class="trip-note">${escapeHtml(trip.note)}</div>` : ''}
             ${trip.distanceStatus === 'pending' ? `<div class="hint">${escapeHtml(trip.distanceError || 'Distanz wird nachgeholt, sobald Internet verfügbar ist.')}</div>` : ''}
-            ${(trip.context || 'pendeln') === 'pendeln' && trip.distanceStatus === 'ok' && trip.cost == null ? `<div class="hint">Keine Pendlerpauschale für dieses Datum hinterlegt.</div>` : ''}
-            ${trip.context === 'immobilien' && !isOepvTrip && trip.distanceStatus === 'ok' && trip.cost == null ? `<div class="hint">Kein Kilometersatz für dieses Datum hinterlegt.</div>` : ''}
+            ${(trip.context || 'pendeln') === 'pendeln' && trip.distanceStatus === 'ok' && trip.cost == null ? `<div class="hint warn-text">Keine Pendlerpauschale für dieses Datum hinterlegt.</div>` : ''}
+            ${trip.context === 'immobilien' && !isOepvTrip && trip.distanceStatus === 'ok' && trip.cost == null ? `<div class="hint warn-text">Kein Kilometersatz für dieses Datum hinterlegt.</div>` : ''}
             ${isOepvTrip && trip.ticketPrice == null ? `<div class="hint warn-text">Ticketpreis fehlt</div>` : ''}
             ${tripLocationIds(trip).map((id) => findLocation(id)).some(l => l && isUnverifiedLocation(l)) ? `<div class="hint warn-text">Manuell erfasste Adresse — bitte Genauigkeit prüfen</div>` : ''}
             <div class="trip-actions">
@@ -2569,7 +2569,7 @@
 
     const suggestionRows = state.noteSuggestions.length
       ? state.noteSuggestions.map(s => `
-        <div class="manage-row">
+        <div class="manage-row" style="flex-direction:column; align-items:stretch; gap:8px;">
           <div>${escapeHtml(s.text)}</div>
           <div style="display:flex; gap:16px;">
             <button class="btn-text" data-edit-suggestion="${escapeHtml(s.id)}">Bearbeiten</button>
