@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.7.0';
+  const APP_VERSION = '3.7.1';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -2557,7 +2557,7 @@
 
     const carrierRows = state.carriers.length
       ? sortedByRecency(state.carriers).map(c => `
-        <div class="manage-row">
+        <div class="manage-row" style="flex-direction:column; align-items:stretch; gap:8px;">
           <div>${escapeHtml(c.name)}</div>
           <div style="display:flex; gap:16px;">
             <button class="btn-text" data-edit-carrier="${escapeHtml(c.id)}">Bearbeiten</button>
