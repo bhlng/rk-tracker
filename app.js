@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.6.2';
+  const APP_VERSION = '3.6.3';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -765,17 +765,17 @@
   }
 
   function addDraftWaypoint() {
-    // A new stop always slots in right before Ziel — Ziel itself is never
-    // moved or overwritten, so an already-entered destination is never lost
-    // and never needs retyping. Exception: if Ziel hasn't been filled in
-    // yet, prefill it with a copy of Start (the trip commonly loops back to
-    // where it started) instead of leaving two empty slots — still just one
-    // tap away from changing.
-    const lastIdx = draft.waypoints.length - 1;
-    const zielEmpty = !draft.waypoints[lastIdx];
-    draft.waypoints.splice(lastIdx, 0, null);
-    if (zielEmpty && draft.waypoints[0]) {
-      draft.waypoints[draft.waypoints.length - 1] = draft.waypoints[0];
+    if (draft.waypoints.length === 2 && draft.waypoints[0]) {
+      // First extra stop: assume a round trip back to Start (the common
+      // case) by appending a fresh copy of it as the new Ziel. Whatever was
+      // in Ziel before — filled or still empty — simply becomes the first
+      // Zwischenstopp, since it's no longer the last slot; nothing is lost
+      // or needs retyping, and it's still one tap away from changing.
+      draft.waypoints.push(draft.waypoints[0]);
+    } else {
+      // Later stops: insert a new empty slot right before Ziel, which by
+      // now stays anchored as the last element and is never moved again.
+      draft.waypoints.splice(draft.waypoints.length - 1, 0, null);
     }
     draft.distanceKm = null;
     draft.distanceStatus = 'empty';
