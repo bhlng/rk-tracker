@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.7.3';
+  const APP_VERSION = '3.8.0';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -20,6 +20,7 @@
     routeCache: {},
     rates: [],
     immoRates: [],
+    vehicleRateModes: [],
     settings: { orsApiKey: '', homeLocationId: null, workLocationId: null }
   };
 
@@ -51,6 +52,7 @@
     routeCache: loadKey('routeCache'),
     rates: loadKey('rates'),
     immoRates: loadKey('immoRates'),
+    vehicleRateModes: loadKey('vehicleRateModes'),
     settings: loadKey('settings')
   };
 
@@ -388,6 +390,8 @@
   // Mutates `entry` (a trip or the draft): resolves ratePerKm (unless manually overridden)
   // and (re)computes cost from the current distanceKm. Safe to call any time. Pendeln and
   // Immobilien keep separate, independent rate histories (state.rates / state.immoRates).
+  // For Immobilien+Kfz, WHICH rate history/method applies is itself a per-vehicle-per-year
+  // choice (state.vehicleRateModes, Ausbaustufe 6) rather than "whichever rate is dated latest".
   function computeCost(entry) {
     if (entry.context === 'immobilien' && entry.verkehrsmittel === 'oepv') {
       // No distance/rate math for public transport — cost is whatever
@@ -396,12 +400,28 @@
       return;
     }
     const isImmo = entry.context === 'immobilien';
-    const ratesArray = isImmo ? state.immoRates : state.rates;
     if (entry.rateSource !== 'manual') {
-      const r = findApplicableRate(entry.startDateTime, ratesArray);
-      entry.ratePerKm = r ? r.amount : null;
+      if (isImmo) {
+        const year = (entry.startDateTime || '').slice(0, 4);
+        const mode = state.vehicleRateModes.find(m => m.plate === entry.vehiclePlate && m.year === year);
+        if (!mode) {
+          entry.ratePerKm = null;
+          entry.rateType = null;
+        } else if (mode.rateType === 'tatsaechlich') {
+          // Berechnung aus erfassten Kostenpositionen folgt in Ausbaustufe 6 Phase 2; bis dahin kein Satz auflösbar.
+          entry.ratePerKm = null;
+          entry.rateType = 'tatsaechlich';
+        } else {
+          const typedRates = state.immoRates.filter(r => r.rateType === mode.rateType);
+          const r = findApplicableRate(entry.startDateTime, typedRates);
+          entry.ratePerKm = r ? r.amount : null;
+          entry.rateType = mode.rateType;
+        }
+      } else {
+        const r = findApplicableRate(entry.startDateTime, state.rates);
+        entry.ratePerKm = r ? r.amount : null;
+      }
       entry.rateSource = 'auto';
-      if (isImmo) entry.rateType = r ? r.rateType : null;
     }
     if (entry.distanceStatus === 'ok' && entry.distanceKm != null && entry.ratePerKm != null) {
       entry.cost = Math.round(entry.distanceKm * entry.ratePerKm * 100) / 100;
@@ -508,6 +528,50 @@
       if ((t.context || 'pendeln') === 'immobilien' && t.rateSource === 'auto') computeCost(t);
     }
     saveKey('trips');
+    render();
+  }
+
+  function recomputeTripsForVehicle(plate) {
+    for (const t of state.trips) {
+      if ((t.context || 'pendeln') === 'immobilien' && (t.verkehrsmittel || 'kfz') === 'kfz' && t.vehiclePlate === plate && t.rateSource !== 'manual') {
+        computeCost(t);
+      }
+    }
+    saveKey('trips');
+  }
+
+  function addVehicleRateMode() {
+    const plate = document.getElementById('new-vrm-plate').value;
+    const year = document.getElementById('new-vrm-year').value;
+    const rateType = document.getElementById('new-vrm-type').value;
+    if (!plate || !/^\d{4}$/.test(year)) {
+      toast('Bitte Fahrzeug und ein gültiges Jahr angeben');
+      return;
+    }
+    let totalKm = null;
+    if (rateType === 'tatsaechlich') {
+      totalKm = parseFloat(document.getElementById('new-vrm-totalkm').value.replace(',', '.'));
+      if (isNaN(totalKm) || totalKm <= 0) {
+        toast('Bitte eine gültige Gesamt-Jahresfahrleistung angeben');
+        return;
+      }
+    }
+    const existingIdx = state.vehicleRateModes.findIndex(m => m.plate === plate && m.year === year);
+    const mode = { id: existingIdx >= 0 ? state.vehicleRateModes[existingIdx].id : uid(), plate, year, rateType, totalKm };
+    if (existingIdx >= 0) state.vehicleRateModes[existingIdx] = mode; else state.vehicleRateModes.push(mode);
+    saveKey('vehicleRateModes');
+    recomputeTripsForVehicle(plate);
+    toast('Kilometersatz-Art gespeichert');
+    render();
+  }
+
+  async function deleteVehicleRateMode(id) {
+    const ok = await confirmDialog('Diese Kilometersatz-Art-Auswahl löschen?');
+    if (!ok) return;
+    const mode = state.vehicleRateModes.find(m => m.id === id);
+    state.vehicleRateModes = state.vehicleRateModes.filter(m => m.id !== id);
+    saveKey('vehicleRateModes');
+    if (mode) recomputeTripsForVehicle(mode.plate);
     render();
   }
 
@@ -1641,6 +1705,7 @@
       noteSuggestions: state.noteSuggestions,
       rates: state.rates,
       immoRates: state.immoRates,
+      vehicleRateModes: state.vehicleRateModes,
       routeCache: state.routeCache,
       settings: state.settings
     };
@@ -1660,7 +1725,7 @@
 
   async function importBackupFile(file) {
     const cloudNote = currentUser ? ' Da du angemeldet bist, wird dies auch mit all deinen anderen angemeldeten Geräten synchronisiert.' : '';
-    const ok = await confirmDialog(`Dies ersetzt ALLE aktuellen Daten (Reisen, Adressen, Fahrzeuge, Objekte, Verkehrsmittel, Anlass-Vorschläge, Sätze, API-Key) durch den Inhalt der Backup-Datei.${cloudNote} Fortfahren?`, 'Ersetzen');
+    const ok = await confirmDialog(`Dies ersetzt ALLE aktuellen Daten (Reisen, Adressen, Fahrzeuge, Objekte, Verkehrsmittel, Anlass-Vorschläge, Sätze, Kilometersatz-Arten, API-Key) durch den Inhalt der Backup-Datei.${cloudNote} Fortfahren?`, 'Ersetzen');
     if (!ok) return;
     try {
       const text = await file.text();
@@ -1674,6 +1739,7 @@
       state.noteSuggestions = Array.isArray(data.noteSuggestions) ? data.noteSuggestions : JSON.parse(JSON.stringify(DEFAULTS.noteSuggestions));
       state.rates = Array.isArray(data.rates) ? data.rates : [];
       state.immoRates = Array.isArray(data.immoRates) ? data.immoRates : [];
+      state.vehicleRateModes = Array.isArray(data.vehicleRateModes) ? data.vehicleRateModes : [];
       state.routeCache = (data.routeCache && typeof data.routeCache === 'object') ? data.routeCache : {};
       state.settings = (data.settings && typeof data.settings === 'object') ? data.settings : { orsApiKey: '' };
       saveKey('trips');
@@ -1684,6 +1750,7 @@
       saveKey('noteSuggestions');
       saveKey('rates');
       saveKey('immoRates');
+      saveKey('vehicleRateModes');
       saveKey('routeCache');
       saveKey('settings');
       toast('Backup importiert');
@@ -1694,7 +1761,7 @@
   }
 
   // ---------- Cloud sync (Firebase) ----------
-  const CLOUD_SYNCED_KEYS = ['trips', 'locations', 'vehicles', 'objekte', 'carriers', 'noteSuggestions', 'rates', 'immoRates', 'settings']; // not routeCache: regenerable, no data-loss risk
+  const CLOUD_SYNCED_KEYS = ['trips', 'locations', 'vehicles', 'objekte', 'carriers', 'noteSuggestions', 'rates', 'immoRates', 'vehicleRateModes', 'settings']; // not routeCache: regenerable, no data-loss risk
 
   const firebaseConfig = {
     apiKey: 'AIzaSyDLfAXQUAWnv31czdwS_u4OZ_FnTlTolbI',
@@ -2586,6 +2653,14 @@
         </div>`).join('')
       : `<div class="hint">Noch keine Pendlerpauschale hinterlegt. Ohne Satz werden keine Kosten berechnet.</div>`;
 
+    const vehicleRateModeRows = state.vehicleRateModes.length
+      ? [...state.vehicleRateModes].sort((a, b) => b.year.localeCompare(a.year) || a.plate.localeCompare(b.plate)).map(m => `
+        <div class="manage-row">
+          <div>${escapeHtml(m.plate)} · ${escapeHtml(m.year)} <span class="sub">${escapeHtml(RATE_TYPE_LABELS[m.rateType] || m.rateType)}${m.rateType === 'tatsaechlich' && m.totalKm ? ' · ' + m.totalKm + ' km/Jahr' : ''}</span></div>
+          <button class="btn-danger" data-del-vrm="${escapeHtml(m.id)}">Löschen</button>
+        </div>`).join('')
+      : `<div class="hint">Noch keine Kilometersatz-Art je Fahrzeug ausgewählt. Ohne Auswahl werden für Immobilien-Kfz-Reisen keine Kosten berechnet.</div>`;
+
     const immoRateRows = state.immoRates.length
       ? [...state.immoRates].sort((a, b) => b.validFrom.localeCompare(a.validFrom)).map(r => `
         <div class="manage-row">
@@ -2683,6 +2758,35 @@
       <div class="section-title">Verkehrsmittel-Anbieter</div>
       <div class="card">${carrierRows}</div>
 
+      <div class="section-title">Kilometersatz-Art je Fahrzeug</div>
+      <div class="card">
+        ${vehicleRateModeRows}
+        <div class="field" style="margin-top:16px;">
+          <label>Neue Auswahl</label>
+          <div class="two-col">
+            <select id="new-vrm-plate">
+              ${state.vehicles.length ? state.vehicles.map(v => `<option value="${escapeHtml(v.plate)}">${escapeHtml(v.plate)}</option>`).join('') : `<option value="">Kein Fahrzeug gespeichert</option>`}
+            </select>
+            <input type="number" id="new-vrm-year" placeholder="Jahr" value="${new Date().getFullYear()}" min="2000" max="2100">
+          </div>
+          <div class="field" style="margin-top:10px;">
+            <label for="new-vrm-type">Art</label>
+            <select id="new-vrm-type">
+              <option value="pauschal">Pauschal</option>
+              <option value="tatsaechlich">Tatsächliche Kosten</option>
+              <option value="tabelle">Tabelle</option>
+            </select>
+          </div>
+          <div class="field" id="new-vrm-totalkm-field" hidden style="margin-top:10px;">
+            <label for="new-vrm-totalkm">Gesamt-Jahresfahrleistung</label>
+            <div class="input-suffix"><input type="text" inputmode="decimal" id="new-vrm-totalkm" placeholder="20000"><span class="suffix">km</span></div>
+            <div class="hint">Alle Kilometer, die im Jahr insgesamt mit diesem Fahrzeug gefahren wurden — Immo-Privat-Nutzung und sonstige Privat-Nutzung zusammen.</div>
+          </div>
+          <div class="hint">Legt fest, welche Kilometersatz-Art für dieses Fahrzeug im gewählten Jahr gilt, bis zur nächsten Änderung. Eine neue Auswahl überschreibt eine bereits vorhandene für dasselbe Fahrzeug und Jahr.</div>
+        </div>
+        <button class="btn-secondary" id="btn-add-vrm">Auswahl speichern</button>
+      </div>
+
       <div class="section-title">Kilometersatz (Immobilien)</div>
       <div class="card">
         ${immoRateRows}
@@ -2696,11 +2800,10 @@
             <label for="new-immo-rate-type">Art</label>
             <select id="new-immo-rate-type">
               <option value="pauschal">Pauschal</option>
-              <option value="tatsaechlich">Tatsächliche Kosten</option>
               <option value="tabelle">Tabelle</option>
             </select>
           </div>
-          <div class="hint">Betrag in Euro pro Kilometer, gültig ab dem gewählten Datum. Alle drei Arten funktionieren aktuell technisch gleich (manueller Betrag) — die Unterscheidung bereitet spätere automatische Berechnung vor.</div>
+          <div class="hint">Betrag in Euro pro Kilometer, gültig ab dem gewählten Datum. Gilt für Fahrzeuge, die oben auf diese Art eingestellt sind. "Tatsächliche Kosten" wird nicht hier eingetragen, sondern aus Kostenpositionen berechnet.</div>
         </div>
         <button class="btn-secondary" id="btn-add-immo-rate">Satz speichern</button>
       </div>
@@ -2783,6 +2886,17 @@
     document.querySelectorAll('[data-del-immo-rate]').forEach(btn => {
       btn.addEventListener('click', () => deleteImmoRate(btn.getAttribute('data-del-immo-rate')));
     });
+    const addVrmBtn = document.getElementById('btn-add-vrm');
+    if (addVrmBtn) addVrmBtn.addEventListener('click', addVehicleRateMode);
+    document.querySelectorAll('[data-del-vrm]').forEach(btn => {
+      btn.addEventListener('click', () => deleteVehicleRateMode(btn.getAttribute('data-del-vrm')));
+    });
+    const vrmTypeSelect = document.getElementById('new-vrm-type');
+    if (vrmTypeSelect) {
+      const totalKmField = document.getElementById('new-vrm-totalkm-field');
+      totalKmField.hidden = vrmTypeSelect.value !== 'tatsaechlich';
+      vrmTypeSelect.addEventListener('change', () => { totalKmField.hidden = vrmTypeSelect.value !== 'tatsaechlich'; });
+    }
     const pickHomeBtn = document.getElementById('btn-pick-home');
     if (pickHomeBtn) pickHomeBtn.addEventListener('click', () => openAddressSearch('settings-home'));
     const pickWorkBtn = document.getElementById('btn-pick-work');
