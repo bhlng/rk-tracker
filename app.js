@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.5.0';
+  const APP_VERSION = '3.6.0';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -74,6 +74,7 @@
       context: currentContext,
       startLocationId: homeLoc ? homeLoc.id : null,
       endLocationId: workLoc ? workLoc.id : null,
+      waypoints: currentContext === 'immobilien' ? [null, null] : undefined, // Immobilien only, replaces start/end
       distanceKm: null,
       distanceStatus: (homeLoc && workLoc) ? 'pending' : 'empty', // empty | pending | ok
       distanceError: null,
@@ -328,6 +329,14 @@
     return loc ? escapeHtml(loc.label) : '<span class="warn-text">gelöschter Ort</span>';
   }
 
+  // Generalizes over Pendeln's fixed start/end pair and Immobilien's
+  // variable-length waypoints list (falling back to start/end for legacy
+  // Immobilien trips saved before waypoints existed).
+  function tripLocationIds(trip) {
+    if (trip.context === 'immobilien' && Array.isArray(trip.waypoints) && trip.waypoints.length) return trip.waypoints;
+    return [trip.startLocationId, trip.endLocationId];
+  }
+
   function sortedByRecency(list) {
     return [...list].sort((a, b) => (b.lastUsedAt || '').localeCompare(a.lastUsedAt || ''));
   }
@@ -347,6 +356,16 @@
     obj.usageCount = (obj.usageCount || 0) + 1;
     obj.lastUsedAt = nowIso();
     saveKey('objekte');
+  }
+
+  function bumpWaypointUsage(waypoints) {
+    const t = nowIso();
+    let changed = false;
+    for (const locId of waypoints) {
+      const loc = findLocation(locId);
+      if (loc) { loc.usageCount = (loc.usageCount || 0) + 1; loc.lastUsedAt = t; changed = true; }
+    }
+    if (changed) saveKey('locations');
   }
 
   // ---------- Kilometersatz / Kosten ----------
@@ -624,11 +643,90 @@
     computeCost(entry);
   }
 
+  // Single ORS call for all legs of a route at once (saves quota vs. one
+  // call per pair). Falls back to sequential fetchRouteKm calls if it fails
+  // (different ORS deployments/keys can differ in what's enabled).
+  async function fetchRouteLegsKm(locs) {
+    const key = state.settings.orsApiKey;
+    if (!key) { const e = new Error('no-key'); throw e; }
+    const coordinates = locs.map(l => [l.lon, l.lat]);
+    const res = await fetch(`${ORS_BASE}/v2/directions/driving-car/geojson?api_key=${encodeURIComponent(key)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ coordinates })
+    });
+    if (!res.ok) throw new Error('directions-failed');
+    const data = await res.json();
+    const feat = data.features && data.features[0];
+    const segments = feat && feat.properties && feat.properties.segments;
+    if (!segments || segments.length !== locs.length - 1) throw new Error('directions-empty');
+    return segments.map(s => Math.round((s.distance / 1000) * 10) / 10);
+  }
+
+  // Immobilien only: sums the distance across an ordered list of waypoints
+  // (entry.waypoints, length >= 2) instead of a single start/end pair.
+  // Mutates `entry` in place. Reuses routeCache per consecutive pair, so a
+  // leg already known from a Pendeln trip (or another route) costs nothing.
+  async function calcWaypointDistance(entry) {
+    const locs = entry.waypoints.map(id => findLocation(id));
+    if (!locs.length || locs.some(l => !l)) {
+      entry.distanceStatus = 'empty';
+      entry.distanceKm = null;
+      entry.distanceError = null;
+      entry.legs = null;
+      computeCost(entry);
+      return;
+    }
+    const pairs = [];
+    for (let i = 0; i < entry.waypoints.length - 1; i++) pairs.push([entry.waypoints[i], entry.waypoints[i + 1]]);
+    const cachedLegs = pairs.map(([a, b]) => state.routeCache[routeKey(a, b)]);
+    if (cachedLegs.every(Boolean)) {
+      entry.legs = cachedLegs.map(c => c.km);
+      entry.distanceKm = Math.round(entry.legs.reduce((a, b) => a + b, 0) * 10) / 10;
+      entry.distanceStatus = 'ok';
+      entry.distanceError = null;
+      computeCost(entry);
+      return;
+    }
+    entry.distanceStatus = 'pending';
+    entry.distanceError = null;
+    try {
+      for (const l of locs) await ensureLocationGeocoded(l);
+      let legsKm;
+      try {
+        legsKm = await fetchRouteLegsKm(locs);
+      } catch (e) {
+        legsKm = [];
+        for (let i = 0; i < locs.length - 1; i++) legsKm.push(await fetchRouteKm(locs[i], locs[i + 1]));
+      }
+      const calculatedAt = nowIso();
+      pairs.forEach(([a, b], i) => { state.routeCache[routeKey(a, b)] = { km: legsKm[i], calculatedAt }; });
+      saveKey('routeCache');
+      entry.legs = legsKm;
+      entry.distanceKm = Math.round(legsKm.reduce((a, b) => a + b, 0) * 10) / 10;
+      entry.distanceStatus = 'ok';
+      entry.distanceError = null;
+    } catch (e) {
+      entry.distanceStatus = 'pending';
+      entry.distanceKm = null;
+      entry.distanceError = (e && e.message === 'no-key') ? 'Kein API-Key hinterlegt' : 'Distanz konnte nicht berechnet werden';
+    }
+    computeCost(entry);
+  }
+
+  // Dispatches to the right distance calculator depending on whether `entry`
+  // is an Immobilien trip/draft using the newer waypoints model.
+  function calcEntryDistance(entry) {
+    return (entry.context === 'immobilien' && Array.isArray(entry.waypoints))
+      ? calcWaypointDistance(entry)
+      : calcDistance(entry);
+  }
+
   async function retryAllPending() {
     const pending = state.trips.filter(t => t.distanceStatus === 'pending');
     if (!pending.length) return;
     for (const trip of pending) {
-      await calcDistance(trip);
+      await calcEntryDistance(trip);
     }
     saveKey('trips');
     if (currentView === 'trips') render();
@@ -649,9 +747,53 @@
     render();
   }
 
+  // Immobilien only: sets one stop in the ordered waypoints list.
+  async function setDraftWaypoint(index, locId) {
+    draft.waypoints[index] = locId;
+    if (!draft.waypoints.every((id) => id)) {
+      draft.distanceKm = null;
+      draft.distanceStatus = 'empty';
+      draft.distanceError = null;
+      draft.legs = null;
+      render();
+      return;
+    }
+    const p = calcWaypointDistance(draft);
+    render();
+    await p;
+    render();
+  }
+
+  function addDraftWaypoint() {
+    draft.waypoints.push(null);
+    draft.distanceKm = null;
+    draft.distanceStatus = 'empty';
+    draft.distanceError = null;
+    draft.legs = null;
+    render();
+  }
+
+  async function removeDraftWaypoint(index) {
+    if (draft.waypoints.length <= 2) return;
+    draft.waypoints.splice(index, 1);
+    if (!draft.waypoints.every((id) => id)) {
+      draft.distanceKm = null;
+      draft.distanceStatus = 'empty';
+      draft.distanceError = null;
+      draft.legs = null;
+      render();
+      return;
+    }
+    const p = calcWaypointDistance(draft);
+    render();
+    await p;
+    render();
+  }
+
   // Dispatches an address chosen in openAddressSearch to wherever it belongs:
-  // the in-progress trip draft ('start'/'end'), or a Settings-level default
-  // ('settings-home'/'settings-work'), which just needs to be saved & re-rendered.
+  // the in-progress trip draft ('start'/'end'/'waypoint-N'), or a
+  // Settings-level default ('settings-home'/'settings-work'), which just
+  // needs to be saved & re-rendered.
   function resolveLocationForRole(role, locId) {
     if (role === 'settings-home') {
       state.settings.homeLocationId = locId;
@@ -661,12 +803,22 @@
       state.settings.workLocationId = locId;
       saveKey('settings');
       render();
+    } else if (role.startsWith('waypoint-')) {
+      setDraftWaypoint(Number(role.slice('waypoint-'.length)), locId);
     } else {
       setDraftLocation(role, locId);
     }
   }
 
   async function retryDraftDistance() {
+    if (draft.context === 'immobilien' && Array.isArray(draft.waypoints)) {
+      if (!draft.waypoints.every((id) => id)) return;
+      const p = calcWaypointDistance(draft);
+      render();
+      await p;
+      render();
+      return;
+    }
     if (!(draft.startLocationId && draft.endLocationId)) return;
     const p = calcDistance(draft);
     render();
@@ -677,7 +829,7 @@
   async function retryTripDistance(tripId) {
     const trip = state.trips.find(t => t.id === tripId);
     if (!trip) return;
-    await calcDistance(trip);
+    await calcEntryDistance(trip);
     saveKey('trips');
     render();
   }
@@ -740,26 +892,34 @@
 
   // ---------- Trip CRUD ----------
   function validateDraft() {
-    if (!(draft.startLocationId && draft.endLocationId && draft.startDateTime && draft.vehiclePlate)) return false;
+    const hasRoute = (draft.context === 'immobilien' && Array.isArray(draft.waypoints))
+      ? draft.waypoints.length >= 2 && draft.waypoints.every((id) => id)
+      : !!(draft.startLocationId && draft.endLocationId);
+    if (!hasRoute || !draft.startDateTime || !draft.vehiclePlate) return false;
     if (draft.context === 'immobilien' && !draft.objektKuerzel) return false;
     return true;
   }
 
   async function saveTrip() {
     if (!validateDraft()) {
-      toast(draft.context === 'immobilien' ? 'Bitte Start, Ziel, Datum, Fahrzeug und Objekt angeben' : 'Bitte Start, Ziel, Datum und Fahrzeug angeben');
+      const isImmoWaypoints = draft.context === 'immobilien' && Array.isArray(draft.waypoints);
+      toast(isImmoWaypoints ? 'Bitte alle Stopps, Datum, Fahrzeug und Objekt angeben' : (draft.context === 'immobilien' ? 'Bitte Start, Ziel, Datum, Fahrzeug und Objekt angeben' : 'Bitte Start, Ziel, Datum und Fahrzeug angeben'));
       return;
     }
-    const startLoc = findLocation(draft.startLocationId);
-    const endLoc = findLocation(draft.endLocationId);
+    const isImmoWaypoints = draft.context === 'immobilien' && Array.isArray(draft.waypoints);
+    const startLoc = isImmoWaypoints ? null : findLocation(draft.startLocationId);
+    const endLoc = isImmoWaypoints ? null : findLocation(draft.endLocationId);
     const veh = state.vehicles.find(v => v.plate === draft.vehiclePlate);
 
     if (editingTripId) {
       const trip = state.trips.find(t => t.id === editingTripId);
-      const routeChanged = trip.startLocationId !== draft.startLocationId || trip.endLocationId !== draft.endLocationId;
+      const routeChanged = trip.startLocationId !== draft.startLocationId || trip.endLocationId !== draft.endLocationId ||
+        JSON.stringify(trip.waypoints || null) !== JSON.stringify(draft.waypoints || null);
       Object.assign(trip, {
         startLocationId: draft.startLocationId,
         endLocationId: draft.endLocationId,
+        waypoints: draft.waypoints ? [...draft.waypoints] : null,
+        legs: draft.legs || null,
         startDateTime: draft.startDateTime,
         endDateTime: draft.endDateTime,
         vehiclePlate: draft.vehiclePlate,
@@ -776,11 +936,12 @@
         trip.distanceError = null;
       }
       bumpUsage(startLoc, endLoc, veh);
+      if (isImmoWaypoints) bumpWaypointUsage(draft.waypoints);
       if (trip.context === 'immobilien') bumpObjektUsage(trip.objektKuerzel);
       computeCost(trip);
       saveKey('trips');
       if (trip.distanceStatus !== 'ok') {
-        await calcDistance(trip);
+        await calcEntryDistance(trip);
         saveKey('trips');
       }
       editingTripId = null;
@@ -790,6 +951,8 @@
         context: draft.context || currentContext,
         startLocationId: draft.startLocationId,
         endLocationId: draft.endLocationId,
+        waypoints: draft.waypoints ? [...draft.waypoints] : null,
+        legs: draft.legs || null,
         distanceKm: draft.distanceKm,
         distanceStatus: draft.distanceStatus === 'ok' ? 'ok' : 'pending',
         distanceError: null,
@@ -807,11 +970,12 @@
       };
       state.trips.push(trip);
       bumpUsage(startLoc, endLoc, veh);
+      if (isImmoWaypoints) bumpWaypointUsage(draft.waypoints);
       if (trip.context === 'immobilien') bumpObjektUsage(trip.objektKuerzel);
       computeCost(trip);
       saveKey('trips');
       if (trip.distanceStatus !== 'ok') {
-        await calcDistance(trip);
+        await calcEntryDistance(trip);
         saveKey('trips');
       }
     }
@@ -830,6 +994,13 @@
       context: trip.context || 'pendeln',
       startLocationId: trip.startLocationId,
       endLocationId: trip.endLocationId,
+      // Legacy Immobilien trips saved before waypoints existed (Phase 1-4)
+      // only have startLocationId/endLocationId — migrate them into a
+      // 2-stop waypoints list on first edit.
+      waypoints: trip.context === 'immobilien'
+        ? (Array.isArray(trip.waypoints) && trip.waypoints.length >= 2 ? [...trip.waypoints] : [trip.startLocationId || null, trip.endLocationId || null])
+        : undefined,
+      legs: trip.legs || null,
       distanceKm: trip.distanceKm,
       distanceStatus: trip.distanceStatus,
       distanceError: trip.distanceError,
@@ -1640,6 +1811,9 @@
     for (const t of state.trips) {
       if (t.startLocationId === sourceId) t.startLocationId = targetId;
       if (t.endLocationId === sourceId) t.endLocationId = targetId;
+      if (Array.isArray(t.waypoints)) {
+        t.waypoints = t.waypoints.map((id) => id === sourceId ? targetId : id);
+      }
     }
     saveKey('trips');
     const source = findLocation(sourceId);
@@ -1835,11 +2009,16 @@
 
   // ---------- Views ----------
   function distanceBoxHtml(entry, retryAction) {
-    if (!entry.startLocationId || !entry.endLocationId) {
-      return `<div class="distance-box"><span class="distance-value pending">Start und Ziel wählen</span></div>`;
+    const isWaypointEntry = entry.context === 'immobilien' && Array.isArray(entry.waypoints);
+    const hasAllStops = isWaypointEntry ? entry.waypoints.every((id) => id) : !!(entry.startLocationId && entry.endLocationId);
+    if (!hasAllStops) {
+      return `<div class="distance-box"><span class="distance-value pending">${isWaypointEntry ? 'Alle Stopps wählen' : 'Start und Ziel wählen'}</span></div>`;
     }
     if (entry.distanceStatus === 'ok') {
-      return `<div class="distance-box"><span class="distance-value">${entry.distanceKm} km</span></div>`;
+      const legsLine = (isWaypointEntry && Array.isArray(entry.legs) && entry.legs.length > 1)
+        ? `<div class="hint">${entry.legs.map((km) => `${km} km`).join(' + ')} = ${entry.distanceKm} km</div>`
+        : '';
+      return `<div class="distance-box"><span class="distance-value">${entry.distanceKm} km</span></div>${legsLine}`;
     }
     if (entry.distanceStatus === 'pending' && entry.distanceError) {
       return `<div class="distance-box">
@@ -1862,6 +2041,26 @@
       </div>${costLine}`;
   }
 
+  function waypointFieldsHtml() {
+    const waypoints = draft.waypoints || [null, null];
+    return waypoints.map((locId, i) => {
+      const loc = locId ? findLocation(locId) : null;
+      const label = i === 0 ? 'Start' : (i === waypoints.length - 1 ? 'Ziel' : `Zwischenstopp ${i}`);
+      return `
+        <div class="field">
+          <label>${label}</label>
+          <div class="trigger-row">
+            <button class="picker-trigger" data-pick-waypoint="${i}">
+              <span class="${loc ? '' : 'placeholder'}">${loc ? escapeHtml(loc.label) : label + ' wählen'}</span>
+              <span class="chev">›</span>
+            </button>
+            ${waypoints.length > 2 ? `<button type="button" class="icon-btn" data-remove-waypoint="${i}" aria-label="Stopp entfernen">×</button>` : ''}
+          </div>
+        </div>`;
+    }).join('') + `
+        <button type="button" class="btn-text" id="btn-add-waypoint" style="margin: 4px 0 12px 4px;">+ Zwischenstopp</button>`;
+  }
+
   function renderNewView() {
     const startLoc = draft.startLocationId ? findLocation(draft.startLocationId) : null;
     const endLoc = draft.endLocationId ? findLocation(draft.endLocationId) : null;
@@ -1869,6 +2068,7 @@
     return `
       <div class="section-title">${editingTripId ? 'Reise bearbeiten' : 'Neue Reise'}</div>
       <div class="card">
+        ${currentContext === 'immobilien' ? waypointFieldsHtml() : `
         <div class="field">
           <label>Start</label>
           <div class="trigger-row">
@@ -1888,7 +2088,7 @@
             </button>
             <button type="button" class="icon-btn" id="btn-gps-end" title="Standort verwenden" aria-label="Standort verwenden">${PIN_ICON}</button>
           </div>
-        </div>
+        </div>`}
         <div class="field">
           <label>Entfernung</label>
           ${distanceBoxHtml(draft, 'retry-draft')}
@@ -1952,10 +2152,22 @@
   }
 
   function attachNewViewHandlers() {
-    document.getElementById('btn-pick-start').addEventListener('click', () => openAddressSearch('start'));
-    document.getElementById('btn-pick-end').addEventListener('click', () => openAddressSearch('end'));
-    document.getElementById('btn-gps-start').addEventListener('click', () => useGpsForRole('start'));
-    document.getElementById('btn-gps-end').addEventListener('click', () => useGpsForRole('end'));
+    const pickStartBtn = document.getElementById('btn-pick-start');
+    if (pickStartBtn) pickStartBtn.addEventListener('click', () => openAddressSearch('start'));
+    const pickEndBtn = document.getElementById('btn-pick-end');
+    if (pickEndBtn) pickEndBtn.addEventListener('click', () => openAddressSearch('end'));
+    const gpsStartBtn = document.getElementById('btn-gps-start');
+    if (gpsStartBtn) gpsStartBtn.addEventListener('click', () => useGpsForRole('start'));
+    const gpsEndBtn = document.getElementById('btn-gps-end');
+    if (gpsEndBtn) gpsEndBtn.addEventListener('click', () => useGpsForRole('end'));
+    document.querySelectorAll('[data-pick-waypoint]').forEach((btn) => {
+      btn.addEventListener('click', () => openAddressSearch(`waypoint-${btn.getAttribute('data-pick-waypoint')}`));
+    });
+    document.querySelectorAll('[data-remove-waypoint]').forEach((btn) => {
+      btn.addEventListener('click', () => removeDraftWaypoint(Number(btn.getAttribute('data-remove-waypoint'))));
+    });
+    const addWaypointBtn = document.getElementById('btn-add-waypoint');
+    if (addWaypointBtn) addWaypointBtn.addEventListener('click', addDraftWaypoint);
     document.getElementById('btn-pick-vehicle').addEventListener('click', openVehiclePicker);
     const pickObjektBtn = document.getElementById('btn-pick-objekt');
     if (pickObjektBtn) pickObjektBtn.addEventListener('click', openObjektPicker);
@@ -2031,7 +2243,7 @@
         html += `
           <div class="trip-card">
             <div class="trip-row-top">
-              <span class="trip-route">${locationLabelHtml(trip.startLocationId)} → ${locationLabelHtml(trip.endLocationId)}</span>
+              <span class="trip-route">${tripLocationIds(trip).map((id) => locationLabelHtml(id)).join(' → ')}</span>
               <span class="trip-km">${distText}</span>
             </div>
             <div class="trip-meta">${formatDateTime(trip.startDateTime)}${trip.endDateTime ? ' – ' + formatDateTime(trip.endDateTime) : ' · <span class="warn-text">keine Rückkehrzeit</span>'}</div>
@@ -2042,7 +2254,7 @@
             ${trip.distanceStatus === 'pending' ? `<div class="hint">${escapeHtml(trip.distanceError || 'Distanz wird nachgeholt, sobald Internet verfügbar ist.')}</div>` : ''}
             ${(trip.context || 'pendeln') === 'pendeln' && trip.distanceStatus === 'ok' && trip.cost == null ? `<div class="hint">Keine Pendlerpauschale für dieses Datum hinterlegt.</div>` : ''}
             ${trip.context === 'immobilien' && trip.distanceStatus === 'ok' && trip.cost == null ? `<div class="hint">Kein Kilometersatz für dieses Datum hinterlegt.</div>` : ''}
-            ${[findLocation(trip.startLocationId), findLocation(trip.endLocationId)].some(l => l && isUnverifiedLocation(l)) ? `<div class="hint warn-text">Manuell erfasste Adresse — bitte Genauigkeit prüfen</div>` : ''}
+            ${tripLocationIds(trip).map((id) => findLocation(id)).some(l => l && isUnverifiedLocation(l)) ? `<div class="hint warn-text">Manuell erfasste Adresse — bitte Genauigkeit prüfen</div>` : ''}
             <div class="trip-actions">
               <button class="btn-text" data-edit="${escapeHtml(trip.id)}">Bearbeiten</button>
               ${trip.distanceStatus === 'pending' ? `<button class="btn-text" data-retry="${escapeHtml(trip.id)}">Distanz erneut versuchen</button>` : ''}
