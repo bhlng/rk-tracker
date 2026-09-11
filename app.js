@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.6.3';
+  const APP_VERSION = '3.6.4';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -2054,7 +2054,7 @@
 
   function waypointFieldsHtml() {
     const waypoints = draft.waypoints || [null, null];
-    return waypoints.map((locId, i) => {
+    const rows = waypoints.map((locId, i) => {
       const loc = locId ? findLocation(locId) : null;
       const label = i === 0 ? 'Start' : (i === waypoints.length - 1 ? 'Ziel' : `Zwischenstopp ${i}`);
       return `
@@ -2068,8 +2068,10 @@
             ${waypoints.length > 2 ? `<button type="button" class="icon-btn" data-remove-waypoint="${i}" aria-label="Stopp entfernen">×</button>` : ''}
           </div>
         </div>`;
-    }).join('') + `
-        <button type="button" class="btn-text" id="btn-add-waypoint" style="margin: 4px 0 12px 4px;">+ Nächster Stopp</button>`;
+    });
+    const addButton = `<button type="button" class="btn-text" id="btn-add-waypoint" style="margin: 4px 0 12px 4px;">+ Nächster Stopp</button>`;
+    // Sits directly above Ziel, matching where the new stop actually lands.
+    return rows.slice(0, -1).join('') + addButton + rows[rows.length - 1];
   }
 
   function renderNewView() {
