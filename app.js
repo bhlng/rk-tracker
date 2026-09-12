@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.8.0';
+  const APP_VERSION = '3.8.2';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -412,7 +412,9 @@
           entry.ratePerKm = null;
           entry.rateType = 'tatsaechlich';
         } else {
-          const typedRates = state.immoRates.filter(r => r.rateType === mode.rateType);
+          // Pauschal gilt fahrzeugübergreifend; Tabelle-Werte hängen von Marke/Modell/Alter
+          // ab und gelten daher nur für das jeweils eingetragene Fahrzeug.
+          const typedRates = state.immoRates.filter(r => r.rateType === mode.rateType && (mode.rateType !== 'tabelle' || r.plate === entry.vehiclePlate));
           const r = findApplicableRate(entry.startDateTime, typedRates);
           entry.ratePerKm = r ? r.amount : null;
           entry.rateType = mode.rateType;
@@ -431,13 +433,14 @@
   }
 
   // Trips whose auto-resolved rate changes because of `rate` (already inserted into ratesArray).
-  function affectedTripsForRate(rate, ratesArray, context) {
+  function affectedTripsForRate(rate, ratesArray, context, plate) {
     const sorted = [...ratesArray].sort((a, b) => a.validFrom.localeCompare(b.validFrom));
     const idx = sorted.findIndex(r => r.id === rate.id);
     const windowStart = rate.validFrom;
     const windowEnd = sorted[idx + 1] ? sorted[idx + 1].validFrom : null;
     return state.trips.filter(t => {
       if ((t.context || 'pendeln') !== context) return false;
+      if (plate && t.vehiclePlate !== plate) return false;
       if (t.rateSource === 'manual') return false; // missing rateSource (older trips) counts as auto
       const day = (t.startDateTime || '').slice(0, 10);
       if (!day || day < windowStart) return false;
@@ -492,16 +495,24 @@
     const dateVal = document.getElementById('new-immo-rate-date').value;
     const amountVal = parseFloat(document.getElementById('new-immo-rate-amount').value.replace(',', '.'));
     const rateType = document.getElementById('new-immo-rate-type').value;
+    const plate = rateType === 'tabelle' ? document.getElementById('new-immo-rate-plate').value : null;
     if (!dateVal || isNaN(amountVal) || amountVal <= 0) {
       toast('Bitte gültiges Datum und Betrag angeben');
       return;
     }
-    const existingIdx = state.immoRates.findIndex(r => r.validFrom === dateVal);
-    const rate = { id: existingIdx >= 0 ? state.immoRates[existingIdx].id : uid(), validFrom: dateVal, amount: amountVal, rateType };
+    if (rateType === 'tabelle' && !plate) {
+      toast('Bitte ein Fahrzeug auswählen');
+      return;
+    }
+    // Pauschal gilt fahrzeugübergreifend (ein gemeinsamer Satz), Tabelle-Werte hängen von
+    // Marke/Modell/Alter ab und sind daher je Fahrzeug eine eigene Zeitlinie.
+    const existingIdx = state.immoRates.findIndex(r => r.validFrom === dateVal && r.rateType === rateType && (rateType !== 'tabelle' || r.plate === plate));
+    const rate = { id: existingIdx >= 0 ? state.immoRates[existingIdx].id : uid(), validFrom: dateVal, amount: amountVal, rateType, plate };
     if (existingIdx >= 0) state.immoRates[existingIdx] = rate; else state.immoRates.push(rate);
     saveKey('immoRates');
 
-    const affected = affectedTripsForRate(rate, state.immoRates, 'immobilien');
+    const typedRates = state.immoRates.filter(r => r.rateType === rateType && (rateType !== 'tabelle' || r.plate === plate));
+    const affected = affectedTripsForRate(rate, typedRates, 'immobilien', plate);
     if (affected.length) {
       const n = affected.length;
       const msg = `${n} bereits erfasste ${n === 1 ? 'Fahrt fällt' : 'Fahrten fallen'} in den Zeitraum ab ${formatDateOnly(dateVal)}. Auf ${formatEuroPerKm(amountVal)} aktualisieren?`;
@@ -998,6 +1009,58 @@
       backdrop.querySelector('#label-choice-cancel').addEventListener('click', () => cleanup(null));
       backdrop.addEventListener('click', (e) => { if (e.target === backdrop) cleanup(null); });
     });
+  }
+
+  // Neutral, single-action reminder sheet (unlike confirmDialog, whose "confirm"
+  // button is styled red for destructive actions — not fitting for a nudge).
+  function showReminderDialog(message, actionLabel, onAction) {
+    closeSheet();
+    const backdrop = document.createElement('div');
+    backdrop.id = 'sheet-backdrop';
+    backdrop.className = 'sheet-backdrop';
+    backdrop.innerHTML = `
+      <div class="sheet" role="dialog">
+        <div class="sheet-handle"></div>
+        <div style="padding: 6px 20px 20px; font-size: 15px; line-height: 1.5;">${escapeHtml(message)}</div>
+        <div style="display:flex; gap:10px; padding: 0 20px 4px;">
+          <button class="btn-secondary" id="reminder-dismiss" style="flex:1;">Später</button>
+          <button class="btn-primary" id="reminder-action" style="flex:1;">${escapeHtml(actionLabel)}</button>
+        </div>
+      </div>
+    `;
+    appendSheet(backdrop);
+    backdrop.querySelector('#reminder-dismiss').addEventListener('click', closeSheet);
+    backdrop.querySelector('#reminder-action').addEventListener('click', () => { closeSheet(); onAction(); });
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeSheet(); });
+  }
+
+  // Once per calendar year (tracked device-locally, not cloud-synced — a pure
+  // UI nudge), remind about vehicles whose PREVIOUS year was set to "Tatsächliche
+  // Kosten": the true annual mileage is only known once that year is over.
+  function checkActualKmYearReminder() {
+    const currentYear = new Date().getFullYear();
+    const currentYearStr = String(currentYear);
+    let lastChecked = null;
+    try { lastChecked = localStorage.getItem(STORAGE_PREFIX + 'lastActualKmCheckYear'); } catch (e) { /* localStorage unavailable */ }
+    if (lastChecked === currentYearStr) return;
+    try { localStorage.setItem(STORAGE_PREFIX + 'lastActualKmCheckYear', currentYearStr); } catch (e) { /* localStorage unavailable */ }
+    const previousYear = String(currentYear - 1);
+    const affected = state.vehicleRateModes.filter(m => m.year === previousYear && m.rateType === 'tatsaechlich');
+    if (!affected.length) return;
+    const plates = affected.map(m => m.plate).join(', ');
+    showReminderDialog(
+      `Bitte die tatsächlich gefahrenen Kilometer mit ${plates} für ${previousYear} erfassen.`,
+      'Zu den Einstellungen',
+      () => {
+        currentView = 'settings';
+        setContext('immobilien');
+        render();
+        setTimeout(() => {
+          const el = [...document.querySelectorAll('.section-title')].find(s => s.textContent.includes('Kilometersatz-Art je Fahrzeug'));
+          if (el) el.scrollIntoView({ block: 'start' });
+        }, 50);
+      }
+    );
   }
 
   // ---------- Trip CRUD ----------
@@ -2656,7 +2719,10 @@
     const vehicleRateModeRows = state.vehicleRateModes.length
       ? [...state.vehicleRateModes].sort((a, b) => b.year.localeCompare(a.year) || a.plate.localeCompare(b.plate)).map(m => `
         <div class="manage-row">
-          <div>${escapeHtml(m.plate)} · ${escapeHtml(m.year)} <span class="sub">${escapeHtml(RATE_TYPE_LABELS[m.rateType] || m.rateType)}${m.rateType === 'tatsaechlich' && m.totalKm ? ' · ' + m.totalKm + ' km/Jahr' : ''}</span></div>
+          <div>
+            <div>${escapeHtml(m.plate)} · ${escapeHtml(m.year)}</div>
+            <div class="sub">${escapeHtml(RATE_TYPE_LABELS[m.rateType] || m.rateType)}${m.rateType === 'tatsaechlich' && m.totalKm ? ' · ' + m.totalKm + ' km/Jahr' : ''}</div>
+          </div>
           <button class="btn-danger" data-del-vrm="${escapeHtml(m.id)}">Löschen</button>
         </div>`).join('')
       : `<div class="hint">Noch keine Kilometersatz-Art je Fahrzeug ausgewählt. Ohne Auswahl werden für Immobilien-Kfz-Reisen keine Kosten berechnet.</div>`;
@@ -2664,7 +2730,10 @@
     const immoRateRows = state.immoRates.length
       ? [...state.immoRates].sort((a, b) => b.validFrom.localeCompare(a.validFrom)).map(r => `
         <div class="manage-row">
-          <div>ab ${formatDateOnly(r.validFrom)} <span class="sub">${formatEuroPerKm(r.amount)} · ${escapeHtml(RATE_TYPE_LABELS[r.rateType] || r.rateType)}</span></div>
+          <div>
+            <div>ab ${formatDateOnly(r.validFrom)} ${formatEuroPerKm(r.amount)}</div>
+            <div class="sub">${escapeHtml(RATE_TYPE_LABELS[r.rateType] || r.rateType)}${r.rateType === 'tabelle' && r.plate ? ' · ' + escapeHtml(r.plate) : ''}</div>
+          </div>
           <button class="btn-danger" data-del-immo-rate="${escapeHtml(r.id)}">Löschen</button>
         </div>`).join('')
       : `<div class="hint">Noch kein Kilometersatz hinterlegt. Ohne Satz werden keine Kosten berechnet.</div>`;
@@ -2803,7 +2872,14 @@
               <option value="tabelle">Tabelle</option>
             </select>
           </div>
-          <div class="hint">Betrag in Euro pro Kilometer, gültig ab dem gewählten Datum. Gilt für Fahrzeuge, die oben auf diese Art eingestellt sind. "Tatsächliche Kosten" wird nicht hier eingetragen, sondern aus Kostenpositionen berechnet.</div>
+          <div class="field" id="new-immo-rate-plate-field" hidden style="margin-top:10px;">
+            <label for="new-immo-rate-plate">Fahrzeug</label>
+            <select id="new-immo-rate-plate">
+              ${state.vehicles.length ? state.vehicles.map(v => `<option value="${escapeHtml(v.plate)}">${escapeHtml(v.plate)}</option>`).join('') : `<option value="">Kein Fahrzeug gespeichert</option>`}
+            </select>
+            <div class="hint">Tabellen-Kilometersätze hängen von Marke, Modell und Alter ab und gelten daher nur für dieses eine Fahrzeug.</div>
+          </div>
+          <div class="hint">Betrag in Euro pro Kilometer, gültig ab dem gewählten Datum. Pauschal gilt für alle Fahrzeuge, die oben auf diese Art eingestellt sind. "Tatsächliche Kosten" wird nicht hier eingetragen, sondern aus Kostenpositionen berechnet.</div>
         </div>
         <button class="btn-secondary" id="btn-add-immo-rate">Satz speichern</button>
       </div>
@@ -2897,6 +2973,12 @@
       totalKmField.hidden = vrmTypeSelect.value !== 'tatsaechlich';
       vrmTypeSelect.addEventListener('change', () => { totalKmField.hidden = vrmTypeSelect.value !== 'tatsaechlich'; });
     }
+    const immoRateTypeSelect = document.getElementById('new-immo-rate-type');
+    if (immoRateTypeSelect) {
+      const plateField = document.getElementById('new-immo-rate-plate-field');
+      plateField.hidden = immoRateTypeSelect.value !== 'tabelle';
+      immoRateTypeSelect.addEventListener('change', () => { plateField.hidden = immoRateTypeSelect.value !== 'tabelle'; });
+    }
     const pickHomeBtn = document.getElementById('btn-pick-home');
     if (pickHomeBtn) pickHomeBtn.addEventListener('click', () => openAddressSearch('settings-home'));
     const pickWorkBtn = document.getElementById('btn-pick-work');
@@ -2984,4 +3066,5 @@
   render();
   retryAllPending();
   initCloudAuth();
+  checkActualKmYearReminder();
 })();
