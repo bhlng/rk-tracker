@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.9.0';
+  const APP_VERSION = '3.9.1';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -1735,7 +1735,7 @@
         <form id="rate-form" style="padding: 4px 18px 20px;">
           <div class="field">
             <label for="rate-amount-input">Betrag pro Kilometer</label>
-            <div class="input-suffix has-clear"><input type="text" inputmode="decimal" id="rate-amount-input" placeholder="0,40" value="${escapeHtml(currentVal)}" enterkeyhint="done"><button type="button" class="input-clear" data-clear-target="rate-amount-input" aria-label="Eingabe löschen">×</button><span class="suffix">€/km</span></div>
+            <div class="input-suffix has-clear"><input type="text" inputmode="decimal" id="rate-amount-input" placeholder="0,30" value="${escapeHtml(currentVal)}" enterkeyhint="done"><button type="button" class="input-clear" data-clear-target="rate-amount-input" aria-label="Eingabe löschen">×</button><span class="suffix">€/km</span></div>
           </div>
           ${isImmo ? `
           <div class="field">
@@ -2761,7 +2761,7 @@
               ${tabelleRatesForPlateHtml(m.plate)}
               <div class="two-col">
                 <input type="date" id="tabelle-date-${escapeHtml(m.id)}" value="${escapeHtml(todayDateStr())}">
-                <div class="input-suffix"><input type="text" inputmode="decimal" id="tabelle-amount-${escapeHtml(m.id)}" placeholder="0,40"><span class="suffix">€/km</span></div>
+                <div class="input-suffix"><input type="text" inputmode="decimal" id="tabelle-amount-${escapeHtml(m.id)}" placeholder="0,30"><span class="suffix">€/km</span></div>
               </div>
               <button class="btn-text" data-add-tabelle-for="${escapeHtml(m.id)}">Satz speichern</button>
             </div>`;
@@ -2781,7 +2781,7 @@
           <div style="display:flex; justify-content:space-between; align-items:center;">
             <div>
               <div>${escapeHtml(m.plate)} · ${escapeHtml(m.year)}</div>
-              <div class="sub">${escapeHtml(RATE_TYPE_LABELS[m.rateType] || m.rateType)}</div>
+              <div>Art: <strong>${escapeHtml(RATE_TYPE_LABELS[m.rateType] || m.rateType)}</strong></div>
             </div>
             <button class="btn-danger" data-del-vrm="${escapeHtml(m.id)}">Löschen</button>
           </div>
@@ -2830,7 +2830,7 @@
           <label>Neuer Satz</label>
           <div class="two-col">
             <input type="date" id="new-rate-date" value="${escapeHtml(todayDateStr())}">
-            <div class="input-suffix"><input type="text" inputmode="decimal" id="new-rate-amount" placeholder="0,40"><span class="suffix">€/km</span></div>
+            <div class="input-suffix"><input type="text" inputmode="decimal" id="new-rate-amount" placeholder="0,30"><span class="suffix">€/km</span></div>
           </div>
           <div class="hint">Betrag in Euro pro Kilometer, gültig ab dem gewählten Datum. Bei rückwirkenden Änderungen fragen wir nach, ob bereits erfasste Fahrten angepasst werden sollen.</div>
         </div>
@@ -2890,13 +2890,13 @@
 
       <div class="section-title">Pauschale (Immobilien, privat)</div>
       <div class="card">
-        <div class="hint" style="margin:0 0 14px;">Gilt für alle Fahrzeuge, die unten auf "Pauschal" eingestellt sind — gesetzlich vorgegeben, änderbar zu einem beliebigen Stichtag.</div>
+        <div class="hint" style="margin:0 0 14px;">Gilt für alle Fahrzeuge, die unten auf "Pauschal" eingestellt sind — änderbar zu einem beliebigen Stichtag.</div>
         ${immoRateRows}
         <div class="field" style="margin-top:16px;">
           <label>Neuer Satz</label>
           <div class="two-col">
             <input type="date" id="new-immo-rate-date" value="${escapeHtml(todayDateStr())}">
-            <div class="input-suffix"><input type="text" inputmode="decimal" id="new-immo-rate-amount" placeholder="0,40"><span class="suffix">€/km</span></div>
+            <div class="input-suffix"><input type="text" inputmode="decimal" id="new-immo-rate-amount" placeholder="0,30"><span class="suffix">€/km</span></div>
           </div>
           <div class="hint">Betrag in Euro pro Kilometer, gültig ab dem gewählten Datum.</div>
         </div>
