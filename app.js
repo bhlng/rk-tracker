@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.8.2';
+  const APP_VERSION = '3.8.3';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -2827,8 +2827,9 @@
       <div class="section-title">Verkehrsmittel-Anbieter</div>
       <div class="card">${carrierRows}</div>
 
-      <div class="section-title">Kilometersatz-Art je Fahrzeug</div>
+      <div class="section-title">Kilometersatz-Art je Fahrzeug (Immobilien, privat)</div>
       <div class="card">
+        <div class="hint" style="margin:0 0 14px;">Gilt nur für Immobilien-Fahrten (privat) — Pendeln-Reisen mit demselben Fahrzeug sind davon nicht betroffen.</div>
         ${vehicleRateModeRows}
         <div class="field" style="margin-top:16px;">
           <label>Neue Auswahl</label>
@@ -2836,7 +2837,9 @@
             <select id="new-vrm-plate">
               ${state.vehicles.length ? state.vehicles.map(v => `<option value="${escapeHtml(v.plate)}">${escapeHtml(v.plate)}</option>`).join('') : `<option value="">Kein Fahrzeug gespeichert</option>`}
             </select>
-            <input type="number" id="new-vrm-year" placeholder="Jahr" value="${new Date().getFullYear()}" min="2000" max="2100">
+            <select id="new-vrm-year">
+              ${(() => { const cy = new Date().getFullYear(); const opts = []; for (let y = cy + 1; y >= cy - 14; y--) opts.push(`<option value="${y}" ${y === cy ? 'selected' : ''}>${y}</option>`); return opts.join(''); })()}
+            </select>
           </div>
           <div class="field" style="margin-top:10px;">
             <label for="new-vrm-type">Art</label>
@@ -2856,8 +2859,9 @@
         <button class="btn-secondary" id="btn-add-vrm">Auswahl speichern</button>
       </div>
 
-      <div class="section-title">Kilometersatz (Immobilien)</div>
+      <div class="section-title">Kilometersatz (Immobilien, privat)</div>
       <div class="card">
+        <div class="hint" style="margin:0 0 14px;">Werte für Fahrzeuge/Jahre, die oben auf "Pauschal" oder "Tabelle" eingestellt sind.</div>
         ${immoRateRows}
         <div class="field" style="margin-top:16px;">
           <label>Neuer Satz</label>
