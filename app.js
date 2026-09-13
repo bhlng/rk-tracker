@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.10.0';
+  const APP_VERSION = '3.11.0';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -21,11 +21,22 @@
     rates: [],
     immoRates: [],
     vehicleRateModes: [],
+    vehicleCosts: [],
     settings: { orsApiKey: '', homeLocationId: null, workLocationId: null }
   };
 
   const RATE_TYPE_LABELS = { pauschal: 'Pauschal', tatsaechlich: 'Tatsächliche Kosten', tabelle: 'Tabelle' };
   const PENDLERPAUSCHALE_THRESHOLD_KM = 20; // ab dem 21. Kilometer gilt ggf. ein höherer Satz
+  const VEHICLE_COST_CATEGORIES = {
+    anschaffung: 'Anschaffung / Abschreibung',
+    tuev_asu: 'TÜV/ASU',
+    kundendienst: 'Kundendienst',
+    reparaturen: 'Reparaturen',
+    reifen: 'Reifen',
+    pflege: 'Pflegekosten',
+    steuern: 'Steuern',
+    ausstattung: 'Ausstattung'
+  };
 
   function loadKey(key) {
     try {
@@ -54,6 +65,7 @@
     rates: loadKey('rates'),
     immoRates: loadKey('immoRates'),
     vehicleRateModes: loadKey('vehicleRateModes'),
+    vehicleCosts: loadKey('vehicleCosts'),
     settings: loadKey('settings')
   };
 
@@ -377,6 +389,29 @@
   }
 
   // ---------- Kilometersatz / Kosten ----------
+  // Summe der Kostenpositionen eines Fahrzeugs für ein Jahr, inklusive anteiliger
+  // linearer Abschreibung (Anschaffung × Satz/Jahr, nur solange bis 100 % erreicht sind).
+  function totalActualCostsForVehicleYear(plate, year) {
+    let sum = 0;
+    for (const c of state.vehicleCosts) {
+      if (c.plate !== plate) continue;
+      if (c.category === 'anschaffung') {
+        const purchaseYear = (c.date || '').slice(0, 4);
+        const pct = c.depreciationPercent || 0;
+        if (purchaseYear && pct > 0) {
+          const yearsSincePurchase = Number(year) - Number(purchaseYear);
+          const usefulLifeYears = Math.ceil(100 / pct);
+          if (yearsSincePurchase >= 0 && yearsSincePurchase < usefulLifeYears) {
+            sum += (c.amount || 0) * (pct / 100);
+          }
+        }
+      } else if ((c.date || '').slice(0, 4) === year) {
+        sum += c.amount || 0;
+      }
+    }
+    return Math.round(sum * 100) / 100;
+  }
+
   function findApplicableRate(dateTimeStr, ratesArray = state.rates) {
     const day = (dateTimeStr || '').slice(0, 10);
     if (!day) return null;
@@ -409,8 +444,12 @@
           entry.ratePerKm = null;
           entry.rateType = null;
         } else if (mode.rateType === 'tatsaechlich') {
-          // Berechnung aus erfassten Kostenpositionen folgt in Ausbaustufe 6 Phase 2; bis dahin kein Satz auflösbar.
-          entry.ratePerKm = null;
+          if (mode.totalKm > 0) {
+            const totalCost = totalActualCostsForVehicleYear(entry.vehiclePlate, year);
+            entry.ratePerKm = Math.round((totalCost / mode.totalKm) * 10000) / 10000;
+          } else {
+            entry.ratePerKm = null;
+          }
           entry.rateType = 'tatsaechlich';
         } else {
           // Pauschal gilt fahrzeugübergreifend; Tabelle-Werte hängen von Marke/Modell/Alter
@@ -564,6 +603,95 @@
     saveKey('vehicleRateModes');
     recomputeTripsForVehicle(mode.plate);
     toast('Gesamt-Jahresfahrleistung gespeichert');
+    render();
+  }
+
+  function openVehicleCostEditor(plate, costId) {
+    closeSheet();
+    const existing = costId ? state.vehicleCosts.find(c => c.id === costId) : null;
+    const backdrop = document.createElement('div');
+    backdrop.id = 'sheet-backdrop';
+    backdrop.className = 'sheet-backdrop';
+    backdrop.innerHTML = `
+      <div class="sheet" role="dialog">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+          <h2>${existing ? 'Kostenposition bearbeiten' : 'Kostenposition erfassen'}</h2>
+          <button class="btn-text" id="sheet-close">Abbrechen</button>
+        </div>
+        <form id="vehicle-cost-form" style="padding: 4px 18px 20px;">
+          <div class="field">
+            <label for="vc-category">Kategorie</label>
+            <select id="vc-category">
+              ${Object.entries(VEHICLE_COST_CATEGORIES).map(([k, label]) => `<option value="${k}" ${existing && existing.category === k ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field" style="margin-top:10px;">
+            <label for="vc-date">Datum</label>
+            <input type="date" id="vc-date" value="${escapeHtml(existing ? existing.date : todayDateStr())}">
+          </div>
+          <div class="field" style="margin-top:10px;">
+            <label for="vc-amount">Betrag</label>
+            <div class="input-suffix"><input type="text" inputmode="decimal" id="vc-amount" placeholder="0,00" value="${existing ? escapeHtml(String(existing.amount).replace('.', ',')) : ''}"><span class="suffix">€</span></div>
+          </div>
+          <div class="field" id="vc-depreciation-field" ${!(existing && existing.category === 'anschaffung') ? 'hidden' : ''} style="margin-top:10px;">
+            <label for="vc-depreciation">Abschreibungssatz</label>
+            <div class="input-suffix"><input type="text" inputmode="decimal" id="vc-depreciation" placeholder="20" value="${existing && existing.depreciationPercent != null ? escapeHtml(String(existing.depreciationPercent).replace('.', ',')) : ''}"><span class="suffix">%/Jahr</span></div>
+            <div class="hint">Linear: der Betrag wird ab dem Kaufjahr jedes Jahr zu diesem Prozentsatz angesetzt, bis 100 % erreicht sind.</div>
+          </div>
+          <button type="submit" class="btn-primary" id="vc-save" style="margin-top:14px;">Speichern</button>
+        </form>
+      </div>
+    `;
+    appendSheet(backdrop);
+    backdrop.querySelector('#sheet-close').addEventListener('click', closeSheet);
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeSheet(); });
+    const categorySelect = backdrop.querySelector('#vc-category');
+    const depField = backdrop.querySelector('#vc-depreciation-field');
+    categorySelect.addEventListener('change', () => { depField.hidden = categorySelect.value !== 'anschaffung'; });
+    backdrop.querySelector('#vehicle-cost-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const category = categorySelect.value;
+      saveVehicleCost(plate, costId, {
+        category,
+        date: backdrop.querySelector('#vc-date').value,
+        amount: parseFloat(backdrop.querySelector('#vc-amount').value.replace(',', '.')),
+        depreciationPercent: category === 'anschaffung' ? parseFloat(backdrop.querySelector('#vc-depreciation').value.replace(',', '.')) : null
+      });
+    });
+    setTimeout(() => backdrop.querySelector('#vc-date').focus(), 50);
+  }
+
+  function saveVehicleCost(plate, costId, data) {
+    if (!data.date || isNaN(data.amount) || data.amount <= 0) {
+      toast('Bitte gültiges Datum und Betrag angeben');
+      return;
+    }
+    if (data.category === 'anschaffung' && (isNaN(data.depreciationPercent) || data.depreciationPercent <= 0 || data.depreciationPercent > 100)) {
+      toast('Bitte einen gültigen Abschreibungssatz (1–100 %) angeben');
+      return;
+    }
+    if (data.category === 'anschaffung') {
+      // Pro Fahrzeug darf es nur eine Anschaffung-Position geben.
+      state.vehicleCosts = state.vehicleCosts.filter(c => !(c.plate === plate && c.category === 'anschaffung' && c.id !== costId));
+    }
+    const idx = state.vehicleCosts.findIndex(c => c.id === costId);
+    const entry = { id: costId || uid(), plate, category: data.category, date: data.date, amount: data.amount, depreciationPercent: data.category === 'anschaffung' ? data.depreciationPercent : null };
+    if (idx >= 0) state.vehicleCosts[idx] = entry; else state.vehicleCosts.push(entry);
+    saveKey('vehicleCosts');
+    recomputeTripsForVehicle(plate);
+    toast('Kostenposition gespeichert');
+    closeSheet();
+    render();
+  }
+
+  async function deleteVehicleCost(id) {
+    const ok = await confirmDialog('Diese Kostenposition löschen?');
+    if (!ok) return;
+    const cost = state.vehicleCosts.find(c => c.id === id);
+    state.vehicleCosts = state.vehicleCosts.filter(c => c.id !== id);
+    saveKey('vehicleCosts');
+    if (cost) recomputeTripsForVehicle(cost.plate);
     render();
   }
 
@@ -1810,6 +1938,7 @@
       rates: state.rates,
       immoRates: state.immoRates,
       vehicleRateModes: state.vehicleRateModes,
+      vehicleCosts: state.vehicleCosts,
       routeCache: state.routeCache,
       settings: state.settings
     };
@@ -1829,7 +1958,7 @@
 
   async function importBackupFile(file) {
     const cloudNote = currentUser ? ' Da du angemeldet bist, wird dies auch mit all deinen anderen angemeldeten Geräten synchronisiert.' : '';
-    const ok = await confirmDialog(`Dies ersetzt ALLE aktuellen Daten (Reisen, Adressen, Fahrzeuge, Objekte, Verkehrsmittel, Anlass-Vorschläge, Sätze, Kilometersatz-Arten, API-Key) durch den Inhalt der Backup-Datei.${cloudNote} Fortfahren?`, 'Ersetzen');
+    const ok = await confirmDialog(`Dies ersetzt ALLE aktuellen Daten (Reisen, Adressen, Fahrzeuge, Objekte, Verkehrsmittel, Anlass-Vorschläge, Sätze, Kilometersatz-Arten, Fahrzeugkosten, API-Key) durch den Inhalt der Backup-Datei.${cloudNote} Fortfahren?`, 'Ersetzen');
     if (!ok) return;
     try {
       const text = await file.text();
@@ -1844,6 +1973,7 @@
       state.rates = Array.isArray(data.rates) ? data.rates : [];
       state.immoRates = Array.isArray(data.immoRates) ? data.immoRates : [];
       state.vehicleRateModes = Array.isArray(data.vehicleRateModes) ? data.vehicleRateModes : [];
+      state.vehicleCosts = Array.isArray(data.vehicleCosts) ? data.vehicleCosts : [];
       state.routeCache = (data.routeCache && typeof data.routeCache === 'object') ? data.routeCache : {};
       state.settings = (data.settings && typeof data.settings === 'object') ? data.settings : { orsApiKey: '' };
       saveKey('trips');
@@ -1855,6 +1985,7 @@
       saveKey('rates');
       saveKey('immoRates');
       saveKey('vehicleRateModes');
+      saveKey('vehicleCosts');
       saveKey('routeCache');
       saveKey('settings');
       toast('Backup importiert');
@@ -1865,7 +1996,7 @@
   }
 
   // ---------- Cloud sync (Firebase) ----------
-  const CLOUD_SYNCED_KEYS = ['trips', 'locations', 'vehicles', 'objekte', 'carriers', 'noteSuggestions', 'rates', 'immoRates', 'vehicleRateModes', 'settings']; // not routeCache: regenerable, no data-loss risk
+  const CLOUD_SYNCED_KEYS = ['trips', 'locations', 'vehicles', 'objekte', 'carriers', 'noteSuggestions', 'rates', 'immoRates', 'vehicleRateModes', 'vehicleCosts', 'settings']; // not routeCache: regenerable, no data-loss risk
 
   const firebaseConfig = {
     apiKey: 'AIzaSyDLfAXQUAWnv31czdwS_u4OZ_FnTlTolbI',
@@ -2771,6 +2902,23 @@
       return rows || `<div class="hint" style="margin:0;">Noch kein Tabellen-Satz für dieses Fahrzeug hinterlegt.</div>`;
     };
 
+    const vehicleCostRowsForPlateHtml = (plate) => {
+      const rows = state.vehicleCosts.filter(c => c.plate === plate)
+        .sort((a, b) => b.date.localeCompare(a.date))
+        .map(c => `
+          <div class="manage-row" style="flex-direction:column; align-items:stretch; gap:8px; padding:8px 0;">
+            <div>
+              <div>${escapeHtml(VEHICLE_COST_CATEGORIES[c.category] || c.category)}</div>
+              <div class="sub">${formatDateOnly(c.date)} · ${formatEuro(c.amount)}${c.category === 'anschaffung' && c.depreciationPercent ? ' · ' + c.depreciationPercent + ' %/Jahr' : ''}</div>
+            </div>
+            <div style="display:flex; gap:16px;">
+              <button class="btn-text" data-edit-vehicle-cost="${escapeHtml(c.id)}">Bearbeiten</button>
+              <button class="btn-danger" data-del-vehicle-cost="${escapeHtml(c.id)}">Löschen</button>
+            </div>
+          </div>`).join('');
+      return rows || `<div class="hint" style="margin:0;">Noch keine Kostenpositionen für dieses Fahrzeug erfasst.</div>`;
+    };
+
     const vehicleRateModeRowHtml = (m) => {
       let inner;
       if (m.rateType === 'pauschal') {
@@ -2787,6 +2935,8 @@
             <button class="btn-text" data-add-tabelle-for="${escapeHtml(m.id)}">Satz speichern</button>
           </div>`;
       } else {
+        const totalCostForYear = totalActualCostsForVehicleYear(m.plate, m.year);
+        const ratePreview = m.totalKm > 0 ? Math.round((totalCostForYear / m.totalKm) * 10000) / 10000 : null;
         inner = `
           <div style="background:var(--bg-elevated-2); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:8px;">
             <div class="field" style="margin:0;">
@@ -2794,7 +2944,10 @@
               <div class="input-suffix"><input type="text" inputmode="decimal" id="totalkm-${escapeHtml(m.id)}" value="${m.totalKm != null ? m.totalKm : ''}" placeholder="20000"><span class="suffix">km</span></div>
             </div>
             <button class="btn-text" data-save-totalkm-for="${escapeHtml(m.id)}">Speichern</button>
-            <div class="hint" style="margin:0;">Kostenerfassung (TÜV, Reparaturen, Abschreibung, …) folgt in einer späteren Ausbaustufe.</div>
+            ${ratePreview != null ? `<div class="hint" style="margin:0;">Kosten ${escapeHtml(m.year)}: ${formatEuro(totalCostForYear)} ÷ ${m.totalKm} km = ${ratePreview.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 4 })} €/km</div>` : ''}
+            <div class="hint" style="margin:8px 0 0;">Kostenpositionen dieses Fahrzeugs (gelten fahrzeugweit, nicht nur für dieses Jahr):</div>
+            ${vehicleCostRowsForPlateHtml(m.plate)}
+            <button class="btn-secondary" data-add-vehicle-cost-for="${escapeHtml(m.plate)}">+ Kosten erfassen</button>
           </div>`;
       }
       return `
@@ -3066,6 +3219,18 @@
     });
     document.querySelectorAll('[data-save-totalkm-for]').forEach(btn => {
       btn.addEventListener('click', () => saveVehicleRateModeTotalKm(btn.getAttribute('data-save-totalkm-for')));
+    });
+    document.querySelectorAll('[data-add-vehicle-cost-for]').forEach(btn => {
+      btn.addEventListener('click', () => openVehicleCostEditor(btn.getAttribute('data-add-vehicle-cost-for'), null));
+    });
+    document.querySelectorAll('[data-edit-vehicle-cost]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const cost = state.vehicleCosts.find(c => c.id === btn.getAttribute('data-edit-vehicle-cost'));
+        if (cost) openVehicleCostEditor(cost.plate, cost.id);
+      });
+    });
+    document.querySelectorAll('[data-del-vehicle-cost]').forEach(btn => {
+      btn.addEventListener('click', () => deleteVehicleCost(btn.getAttribute('data-del-vehicle-cost')));
     });
     const addVrmBtn = document.getElementById('btn-add-vrm');
     if (addVrmBtn) addVrmBtn.addEventListener('click', addVehicleRateMode);
