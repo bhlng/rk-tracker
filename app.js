@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.11.1';
+  const APP_VERSION = '3.12.0';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -25,17 +25,21 @@
     settings: { orsApiKey: '', homeLocationId: null, workLocationId: null }
   };
 
-  const RATE_TYPE_LABELS = { pauschal: 'Pauschal', tatsaechlich: 'Tatsächliche Kosten', tabelle: 'Tabelle' };
+  const RATE_TYPE_LABELS = { pauschal: 'Pauschal', tatsaechlich: 'Tatsächliche Kosten', tabelle: 'ADAC-Tabelle' };
+  const ADAC_KOSTEN_URL = 'https://www.adac.de/rund-ums-fahrzeug/auto-kaufen-verkaufen/autokosten/';
   const PENDLERPAUSCHALE_THRESHOLD_KM = 20; // ab dem 21. Kilometer gilt ggf. ein höherer Satz
   const VEHICLE_COST_CATEGORIES = {
-    anschaffung: 'Anschaffung / Abschreibung',
-    tuev_asu: 'TÜV/ASU',
-    kundendienst: 'Kundendienst',
-    reparaturen: 'Reparaturen',
-    reifen: 'Reifen',
-    pflege: 'Pflegekosten',
-    steuern: 'Steuern',
-    ausstattung: 'Ausstattung'
+    abschreibung: 'Wertverlust / Abschreibung',
+    leasingrate: 'Leasingrate',
+    finanzierung_zinsen: 'Finanzierungskosten (Zinsen)',
+    versicherung: 'Kfz-Versicherung (Haftpflicht, Teil-/Vollkasko, Schutzbrief)',
+    kfz_steuer: 'Kfz-Steuer',
+    kraftstoff_energie: 'Kraftstoff / Strom-Ladekosten',
+    wartung_reparaturen: 'Wartung/Inspektion, Reparaturen, Verschleißteile',
+    reifen: 'Reifen (Wechsel, Auswuchten)',
+    tuev_hu_au: 'TÜV/DEKRA (HU/AU) u. ä. Gebühren',
+    nebenkosten: 'Kfz-Nebenkosten (Zulassung, Kennzeichen, Wagenwäsche)',
+    sonstiges: 'Sonstiges'
   };
 
   function loadKey(key) {
@@ -390,19 +394,18 @@
 
   // ---------- Kilometersatz / Kosten ----------
   // Summe der Kostenpositionen eines Fahrzeugs für ein Jahr, inklusive anteiliger
-  // linearer Abschreibung (Anschaffung × Satz/Jahr, nur solange bis 100 % erreicht sind).
+  // linearer Abschreibung (Anschaffungspreis ÷ Nutzungsdauer, endet nach Ablauf der Jahre).
   function totalActualCostsForVehicleYear(plate, year) {
     let sum = 0;
     for (const c of state.vehicleCosts) {
       if (c.plate !== plate) continue;
-      if (c.category === 'anschaffung') {
+      if (c.category === 'abschreibung') {
         const purchaseYear = (c.date || '').slice(0, 4);
-        const pct = c.depreciationPercent || 0;
-        if (purchaseYear && pct > 0) {
+        const years = c.usefulLifeYears || 0;
+        if (purchaseYear && years > 0) {
           const yearsSincePurchase = Number(year) - Number(purchaseYear);
-          const usefulLifeYears = Math.ceil(100 / pct);
-          if (yearsSincePurchase >= 0 && yearsSincePurchase < usefulLifeYears) {
-            sum += (c.amount || 0) * (pct / 100);
+          if (yearsSincePurchase >= 0 && yearsSincePurchase < years) {
+            sum += (c.amount || 0) / years;
           }
         }
       } else if ((c.date || '').slice(0, 4) === year) {
@@ -410,6 +413,22 @@
       }
     }
     return Math.round(sum * 100) / 100;
+  }
+
+  // Zerlegt die Gesamt-Jahresfahrleistung eines Fahrzeugs in die bereits in der App
+  // erfassten Anteile (Pendeln, Immobilien-Kfz) — der Rest ist sonstige Privatnutzung.
+  function vehicleKmBreakdownForYear(plate, year) {
+    let pendelnKm = 0, immoKm = 0;
+    for (const t of state.trips) {
+      if (t.vehiclePlate !== plate) continue;
+      if ((t.startDateTime || '').slice(0, 4) !== year) continue;
+      if ((t.context || 'pendeln') === 'pendeln') {
+        pendelnKm += t.distanceKm || 0;
+      } else if (t.context === 'immobilien' && (t.verkehrsmittel || 'kfz') === 'kfz') {
+        immoKm += t.distanceKm || 0;
+      }
+    }
+    return { pendelnKm: Math.round(pendelnKm * 10) / 10, immoKm: Math.round(immoKm * 10) / 10 };
   }
 
   function findApplicableRate(dateTimeStr, ratesArray = state.rates) {
@@ -634,10 +653,14 @@
             <label for="vc-amount">Betrag</label>
             <div class="input-suffix"><input type="text" inputmode="decimal" id="vc-amount" placeholder="0,00" value="${existing ? escapeHtml(String(existing.amount).replace('.', ',')) : ''}"><span class="suffix">€</span></div>
           </div>
-          <div class="field" id="vc-depreciation-field" ${!(existing && existing.category === 'anschaffung') ? 'hidden' : ''} style="margin-top:10px;">
-            <label for="vc-depreciation">Abschreibungssatz</label>
-            <div class="input-suffix"><input type="text" inputmode="decimal" id="vc-depreciation" placeholder="20" value="${existing && existing.depreciationPercent != null ? escapeHtml(String(existing.depreciationPercent).replace('.', ',')) : ''}"><span class="suffix">%/Jahr</span></div>
-            <div class="hint">Linear: der Betrag wird ab dem Kaufjahr jedes Jahr zu diesem Prozentsatz angesetzt, bis 100 % erreicht sind.</div>
+          <div class="field" id="vc-depreciation-field" ${!(existing && existing.category === 'abschreibung') ? 'hidden' : ''} style="margin-top:10px;">
+            <label for="vc-depreciation">Nutzungsdauer</label>
+            <div class="input-suffix"><input type="text" inputmode="numeric" id="vc-depreciation" placeholder="6" value="${existing && existing.usefulLifeYears != null ? escapeHtml(String(existing.usefulLifeYears)) : '6'}"><span class="suffix">Jahre</span></div>
+            <div class="hint">Neuwagen: gewöhnliche Nutzungsdauer 6 Jahre. Gebrauchtwagen: verkürzte Restnutzungsdauer je nach Alter/Zustand (z. B. 3 Jahre alt → meist 3 Jahre). Der Betrag wird ab dem Kaufjahr linear über diese Anzahl Jahre verteilt.</div>
+          </div>
+          <div class="field" style="margin-top:10px;">
+            <label for="vc-note">Notiz (optional)</label>
+            <input type="text" id="vc-note" placeholder="z. B. Bremsen + Ölwechsel" maxlength="200" value="${existing && existing.note ? escapeHtml(existing.note) : ''}">
           </div>
           <button type="submit" class="btn-primary" id="vc-save" style="margin-top:14px;">Speichern</button>
         </form>
@@ -648,8 +671,8 @@
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeSheet(); });
     const categorySelect = backdrop.querySelector('#vc-category');
     const depField = backdrop.querySelector('#vc-depreciation-field');
-    depField.hidden = categorySelect.value !== 'anschaffung';
-    categorySelect.addEventListener('change', () => { depField.hidden = categorySelect.value !== 'anschaffung'; });
+    depField.hidden = categorySelect.value !== 'abschreibung';
+    categorySelect.addEventListener('change', () => { depField.hidden = categorySelect.value !== 'abschreibung'; });
     backdrop.querySelector('#vehicle-cost-form').addEventListener('submit', (e) => {
       e.preventDefault();
       const category = categorySelect.value;
@@ -657,7 +680,8 @@
         category,
         date: backdrop.querySelector('#vc-date').value,
         amount: parseFloat(backdrop.querySelector('#vc-amount').value.replace(',', '.')),
-        depreciationPercent: category === 'anschaffung' ? parseFloat(backdrop.querySelector('#vc-depreciation').value.replace(',', '.')) : null
+        usefulLifeYears: category === 'abschreibung' ? parseInt(backdrop.querySelector('#vc-depreciation').value, 10) : null,
+        note: backdrop.querySelector('#vc-note').value.trim() || null
       });
     });
     setTimeout(() => backdrop.querySelector('#vc-date').focus(), 50);
@@ -668,16 +692,16 @@
       toast('Bitte gültiges Datum und Betrag angeben');
       return;
     }
-    if (data.category === 'anschaffung' && (isNaN(data.depreciationPercent) || data.depreciationPercent <= 0 || data.depreciationPercent > 100)) {
-      toast('Bitte einen gültigen Abschreibungssatz (1–100 %) angeben');
+    if (data.category === 'abschreibung' && (isNaN(data.usefulLifeYears) || data.usefulLifeYears <= 0 || data.usefulLifeYears > 30)) {
+      toast('Bitte eine gültige Nutzungsdauer (1–30 Jahre) angeben');
       return;
     }
-    if (data.category === 'anschaffung') {
-      // Pro Fahrzeug darf es nur eine Anschaffung-Position geben.
-      state.vehicleCosts = state.vehicleCosts.filter(c => !(c.plate === plate && c.category === 'anschaffung' && c.id !== costId));
+    if (data.category === 'abschreibung') {
+      // Pro Fahrzeug darf es nur eine Abschreibung-Position geben.
+      state.vehicleCosts = state.vehicleCosts.filter(c => !(c.plate === plate && c.category === 'abschreibung' && c.id !== costId));
     }
     const idx = state.vehicleCosts.findIndex(c => c.id === costId);
-    const entry = { id: costId || uid(), plate, category: data.category, date: data.date, amount: data.amount, depreciationPercent: data.category === 'anschaffung' ? data.depreciationPercent : null };
+    const entry = { id: costId || uid(), plate, category: data.category, date: data.date, amount: data.amount, usefulLifeYears: data.category === 'abschreibung' ? data.usefulLifeYears : null, note: data.note || null };
     if (idx >= 0) state.vehicleCosts[idx] = entry; else state.vehicleCosts.push(entry);
     saveKey('vehicleCosts');
     recomputeTripsForVehicle(plate);
@@ -1890,7 +1914,7 @@
             <select id="rate-type-input">
               <option value="pauschal" ${draft.rateType === 'pauschal' ? 'selected' : ''}>Pauschal</option>
               <option value="tatsaechlich" ${draft.rateType === 'tatsaechlich' ? 'selected' : ''}>Tatsächliche Kosten</option>
-              <option value="tabelle" ${draft.rateType === 'tabelle' ? 'selected' : ''}>Tabelle</option>
+              <option value="tabelle" ${draft.rateType === 'tabelle' ? 'selected' : ''}>ADAC-Tabelle</option>
             </select>
           </div>` : ''}
           <button type="submit" class="btn-primary" id="rate-save">Speichern</button>
@@ -2910,7 +2934,7 @@
           <div class="manage-row" style="flex-direction:column; align-items:stretch; gap:8px; padding:8px 0;">
             <div>
               <div>${escapeHtml(VEHICLE_COST_CATEGORIES[c.category] || c.category)}</div>
-              <div class="sub">${formatDateOnly(c.date)} · ${formatEuro(c.amount)}${c.category === 'anschaffung' && c.depreciationPercent ? ' · ' + c.depreciationPercent + ' %/Jahr' : ''}</div>
+              <div class="sub">${formatDateOnly(c.date)} · ${formatEuro(c.amount)}${c.category === 'abschreibung' && c.usefulLifeYears ? ' · ' + c.usefulLifeYears + ' Jahre Nutzungsdauer' : ''}${c.note ? ' · ' + escapeHtml(c.note) : ''}</div>
             </div>
             <div style="display:flex; gap:16px;">
               <button class="btn-text" data-edit-vehicle-cost="${escapeHtml(c.id)}">Bearbeiten</button>
@@ -2928,6 +2952,7 @@
       } else if (m.rateType === 'tabelle') {
         inner = `
           <div style="background:var(--bg-elevated-2); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:8px;">
+            <div class="hint" style="margin:0;">Werte gemäß <a href="${ADAC_KOSTEN_URL}" target="_blank" rel="noopener">ADAC-Kostentabelle ↗ (externer Link, öffnet in neuem Tab)</a> für Marke/Modell/Alter dieses Fahrzeugs.</div>
             ${tabelleRatesForPlateHtml(m.plate)}
             <div class="two-col">
               <input type="date" id="tabelle-date-${escapeHtml(m.id)}" value="${escapeHtml(todayDateStr())}">
@@ -2938,6 +2963,8 @@
       } else {
         const totalCostForYear = totalActualCostsForVehicleYear(m.plate, m.year);
         const ratePreview = m.totalKm > 0 ? Math.round((totalCostForYear / m.totalKm) * 10000) / 10000 : null;
+        const kmBreakdown = vehicleKmBreakdownForYear(m.plate, m.year);
+        const otherKm = m.totalKm != null ? Math.max(0, Math.round((m.totalKm - kmBreakdown.pendelnKm - kmBreakdown.immoKm) * 10) / 10) : null;
         inner = `
           <div style="background:var(--bg-elevated-2); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:8px;">
             <div class="field" style="margin:0;">
@@ -2945,6 +2972,7 @@
               <div class="input-suffix"><input type="text" inputmode="decimal" id="totalkm-${escapeHtml(m.id)}" value="${m.totalKm != null ? m.totalKm : ''}" placeholder="20000"><span class="suffix">km</span></div>
             </div>
             <button class="btn-text" data-save-totalkm-for="${escapeHtml(m.id)}">Speichern</button>
+            <div class="hint" style="margin:0;">Davon Pendeln: ${kmBreakdown.pendelnKm} km · Immobilien (privat): ${kmBreakdown.immoKm} km${otherKm != null ? ' · sonstige Privatfahrten: ' + otherKm + ' km' : ''}</div>
             ${ratePreview != null ? `<div class="hint" style="margin:0;">Kosten ${escapeHtml(m.year)}: ${formatEuro(totalCostForYear)} ÷ ${m.totalKm} km = ${ratePreview.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 4 })} €/km</div>` : ''}
             <div class="hint" style="margin:8px 0 0;">Kostenpositionen dieses Fahrzeugs (gelten fahrzeugweit, nicht nur für dieses Jahr):</div>
             ${vehicleCostRowsForPlateHtml(m.plate)}
@@ -3118,7 +3146,7 @@
             <select id="new-vrm-type">
               <option value="pauschal">Pauschal</option>
               <option value="tatsaechlich">Tatsächliche Kosten</option>
-              <option value="tabelle">Tabelle</option>
+              <option value="tabelle">ADAC-Tabelle</option>
             </select>
           </div>
           <div class="field" id="new-vrm-totalkm-field" hidden style="margin-top:10px;">

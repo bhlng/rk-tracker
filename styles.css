@@ -704,6 +704,8 @@ textarea:not(:placeholder-shown) ~ .input-clear {
   line-height: 1.4;
 }
 
+.hint a { color: var(--accent); }
+
 .warn-text {
   color: var(--warn);
   font-weight: 600;
