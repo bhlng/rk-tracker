@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.9.1';
+  const APP_VERSION = '3.10.0';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -25,6 +25,7 @@
   };
 
   const RATE_TYPE_LABELS = { pauschal: 'Pauschal', tatsaechlich: 'Tatsächliche Kosten', tabelle: 'Tabelle' };
+  const PENDLERPAUSCHALE_THRESHOLD_KM = 20; // ab dem 21. Kilometer gilt ggf. ein höherer Satz
 
   function loadKey(key) {
     try {
@@ -422,11 +423,19 @@
       } else {
         const r = findApplicableRate(entry.startDateTime, state.rates);
         entry.ratePerKm = r ? r.amount : null;
+        entry.rateAbove20 = r ? (r.amountAbove20 != null ? r.amountAbove20 : r.amount) : null;
       }
       entry.rateSource = 'auto';
     }
     if (entry.distanceStatus === 'ok' && entry.distanceKm != null && entry.ratePerKm != null) {
-      entry.cost = Math.round(entry.distanceKm * entry.ratePerKm * 100) / 100;
+      if (!isImmo && entry.rateSource === 'auto' && entry.rateAbove20 != null) {
+        // Gestaffelte Entfernungspauschale: 1.–20. km zum Satz, ab dem 21. km ggf. ein höherer.
+        const firstTierKm = Math.min(entry.distanceKm, PENDLERPAUSCHALE_THRESHOLD_KM);
+        const secondTierKm = Math.max(0, entry.distanceKm - PENDLERPAUSCHALE_THRESHOLD_KM);
+        entry.cost = Math.round((firstTierKm * entry.ratePerKm + secondTierKm * entry.rateAbove20) * 100) / 100;
+      } else {
+        entry.cost = Math.round(entry.distanceKm * entry.ratePerKm * 100) / 100;
+      }
     } else {
       entry.cost = null;
     }
@@ -452,19 +461,25 @@
   async function addRate() {
     const dateVal = document.getElementById('new-rate-date').value;
     const amountVal = parseFloat(document.getElementById('new-rate-amount').value.replace(',', '.'));
+    const isUniform = document.getElementById('new-rate-uniform').checked;
+    const amountAbove20Val = isUniform ? null : parseFloat(document.getElementById('new-rate-above20').value.replace(',', '.'));
     if (!dateVal || isNaN(amountVal) || amountVal <= 0) {
       toast('Bitte gültiges Datum und Betrag angeben');
       return;
     }
+    if (!isUniform && (isNaN(amountAbove20Val) || amountAbove20Val <= 0)) {
+      toast('Bitte einen gültigen Satz ab dem 21. Kilometer angeben');
+      return;
+    }
     const existingIdx = state.rates.findIndex(r => r.validFrom === dateVal);
-    const rate = { id: existingIdx >= 0 ? state.rates[existingIdx].id : uid(), validFrom: dateVal, amount: amountVal };
+    const rate = { id: existingIdx >= 0 ? state.rates[existingIdx].id : uid(), validFrom: dateVal, amount: amountVal, amountAbove20: isUniform ? null : amountAbove20Val };
     if (existingIdx >= 0) state.rates[existingIdx] = rate; else state.rates.push(rate);
     saveKey('rates');
 
     const affected = affectedTripsForRate(rate, state.rates, 'pendeln');
     if (affected.length) {
       const n = affected.length;
-      const msg = `${n} bereits erfasste ${n === 1 ? 'Fahrt fällt' : 'Fahrten fallen'} in den Zeitraum ab ${formatDateOnly(dateVal)}. Auf ${formatEuroPerKm(amountVal)} aktualisieren?`;
+      const msg = `${n} bereits erfasste ${n === 1 ? 'Fahrt fällt' : 'Fahrten fallen'} in den Zeitraum ab ${formatDateOnly(dateVal)}. Auf ${formatEuroPerKm(amountVal)}${rate.amountAbove20 != null ? ' / ' + formatEuroPerKm(rate.amountAbove20) + ' ab 21. km' : ''} aktualisieren?`;
       const ok = await confirmDialog(msg, 'Aktualisieren');
       for (const t of affected) {
         if (ok) {
@@ -1130,6 +1145,7 @@
         ticketPrice: isOepv ? (draft.ticketPrice != null ? draft.ticketPrice : null) : null,
         note: draft.note,
         ratePerKm: draft.ratePerKm,
+        rateAbove20: draft.rateAbove20 != null ? draft.rateAbove20 : null,
         rateSource: draft.rateSource,
         rateType: draft.rateType || null,
         updatedAt: nowIso()
@@ -1170,6 +1186,7 @@
         ticketPrice: isOepv ? (draft.ticketPrice != null ? draft.ticketPrice : null) : null,
         note: draft.note,
         ratePerKm: draft.ratePerKm,
+        rateAbove20: draft.rateAbove20 != null ? draft.rateAbove20 : null,
         rateSource: draft.rateSource,
         rateType: draft.rateType || null,
         cost: draft.cost,
@@ -1224,6 +1241,7 @@
       ticketPrice: trip.ticketPrice != null ? trip.ticketPrice : null,
       note: trip.note,
       ratePerKm: trip.ratePerKm != null ? trip.ratePerKm : null,
+      rateAbove20: trip.rateAbove20 != null ? trip.rateAbove20 : null,
       rateSource: trip.rateSource || 'auto',
       rateType: trip.rateType || null,
       cost: trip.cost != null ? trip.cost : null
@@ -1761,6 +1779,7 @@
       draft.ratePerKm = val;
       draft.rateSource = 'manual';
       if (isImmo) draft.rateType = backdrop.querySelector('#rate-type-input').value;
+      else draft.rateAbove20 = null; // manuelle Übersteuerung: ein Satz für die gesamte Strecke, keine Staffelung
       computeCost(draft);
       closeSheet();
       render();
@@ -2733,7 +2752,10 @@
     const rateRows = state.rates.length
       ? [...state.rates].sort((a, b) => b.validFrom.localeCompare(a.validFrom)).map(r => `
         <div class="manage-row">
-          <div>ab ${formatDateOnly(r.validFrom)} <span class="sub">${formatEuroPerKm(r.amount)}</span></div>
+          <div>
+            <div>ab ${formatDateOnly(r.validFrom)}</div>
+            <div class="sub">${r.amountAbove20 != null ? formatEuroPerKm(r.amount) + ' (1.–20. km) · ' + formatEuroPerKm(r.amountAbove20) + ' (ab 21. km)' : formatEuroPerKm(r.amount)}</div>
+          </div>
           <button class="btn-danger" data-del-rate="${escapeHtml(r.id)}">Löschen</button>
         </div>`).join('')
       : `<div class="hint">Noch keine Pendlerpauschale hinterlegt. Ohne Satz werden keine Kosten berechnet.</div>`;
@@ -2749,45 +2771,57 @@
       return rows || `<div class="hint" style="margin:0;">Noch kein Tabellen-Satz für dieses Fahrzeug hinterlegt.</div>`;
     };
 
-    const vehicleRateModeRows = state.vehicleRateModes.length
-      ? [...state.vehicleRateModes].sort((a, b) => b.year.localeCompare(a.year) || a.plate.localeCompare(b.plate)).map(m => {
-        let inner;
-        if (m.rateType === 'pauschal') {
-          const pauschalRate = findApplicableRate(`${m.year}-01-01`, state.immoRates.filter(r => r.rateType === 'pauschal'));
-          inner = `<div class="hint" style="margin:0;">→ nutzt die Pauschale oben${pauschalRate ? ' (Stand 1. Januar ' + escapeHtml(m.year) + ': ' + formatEuroPerKm(pauschalRate.amount) + ')' : ' (noch kein Satz hinterlegt)'}</div>`;
-        } else if (m.rateType === 'tabelle') {
-          inner = `
-            <div style="background:var(--bg-elevated-2); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:8px;">
-              ${tabelleRatesForPlateHtml(m.plate)}
-              <div class="two-col">
-                <input type="date" id="tabelle-date-${escapeHtml(m.id)}" value="${escapeHtml(todayDateStr())}">
-                <div class="input-suffix"><input type="text" inputmode="decimal" id="tabelle-amount-${escapeHtml(m.id)}" placeholder="0,30"><span class="suffix">€/km</span></div>
-              </div>
-              <button class="btn-text" data-add-tabelle-for="${escapeHtml(m.id)}">Satz speichern</button>
-            </div>`;
-        } else {
-          inner = `
-            <div style="background:var(--bg-elevated-2); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:8px;">
-              <div class="field" style="margin:0;">
-                <label for="totalkm-${escapeHtml(m.id)}">Gesamt-Jahresfahrleistung</label>
-                <div class="input-suffix"><input type="text" inputmode="decimal" id="totalkm-${escapeHtml(m.id)}" value="${m.totalKm != null ? m.totalKm : ''}" placeholder="20000"><span class="suffix">km</span></div>
-              </div>
-              <button class="btn-text" data-save-totalkm-for="${escapeHtml(m.id)}">Speichern</button>
-              <div class="hint" style="margin:0;">Kostenerfassung (TÜV, Reparaturen, Abschreibung, …) folgt in einer späteren Ausbaustufe.</div>
-            </div>`;
-        }
-        return `
+    const vehicleRateModeRowHtml = (m) => {
+      let inner;
+      if (m.rateType === 'pauschal') {
+        const pauschalRate = findApplicableRate(`${m.year}-01-01`, state.immoRates.filter(r => r.rateType === 'pauschal'));
+        inner = `<div class="hint" style="margin:0;">→ nutzt die Pauschale oben${pauschalRate ? ' (Stand 1. Januar ' + escapeHtml(m.year) + ': ' + formatEuroPerKm(pauschalRate.amount) + ')' : ' (noch kein Satz hinterlegt)'}</div>`;
+      } else if (m.rateType === 'tabelle') {
+        inner = `
+          <div style="background:var(--bg-elevated-2); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:8px;">
+            ${tabelleRatesForPlateHtml(m.plate)}
+            <div class="two-col">
+              <input type="date" id="tabelle-date-${escapeHtml(m.id)}" value="${escapeHtml(todayDateStr())}">
+              <div class="input-suffix"><input type="text" inputmode="decimal" id="tabelle-amount-${escapeHtml(m.id)}" placeholder="0,30"><span class="suffix">€/km</span></div>
+            </div>
+            <button class="btn-text" data-add-tabelle-for="${escapeHtml(m.id)}">Satz speichern</button>
+          </div>`;
+      } else {
+        inner = `
+          <div style="background:var(--bg-elevated-2); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:8px;">
+            <div class="field" style="margin:0;">
+              <label for="totalkm-${escapeHtml(m.id)}">Gesamt-Jahresfahrleistung</label>
+              <div class="input-suffix"><input type="text" inputmode="decimal" id="totalkm-${escapeHtml(m.id)}" value="${m.totalKm != null ? m.totalKm : ''}" placeholder="20000"><span class="suffix">km</span></div>
+            </div>
+            <button class="btn-text" data-save-totalkm-for="${escapeHtml(m.id)}">Speichern</button>
+            <div class="hint" style="margin:0;">Kostenerfassung (TÜV, Reparaturen, Abschreibung, …) folgt in einer späteren Ausbaustufe.</div>
+          </div>`;
+      }
+      return `
         <div class="manage-row" style="flex-direction:column; align-items:stretch; gap:10px;">
           <div style="display:flex; justify-content:space-between; align-items:center;">
-            <div>
-              <div>${escapeHtml(m.plate)} · ${escapeHtml(m.year)}</div>
-              <div>Art: <strong>${escapeHtml(RATE_TYPE_LABELS[m.rateType] || m.rateType)}</strong></div>
-            </div>
+            <div>Jahr: ${escapeHtml(m.year)}</div>
             <button class="btn-danger" data-del-vrm="${escapeHtml(m.id)}">Löschen</button>
           </div>
+          <div>Art: <strong>${escapeHtml(RATE_TYPE_LABELS[m.rateType] || m.rateType)}</strong></div>
           ${inner}
         </div>`;
-      }).join('')
+    };
+
+    // Gruppiert nach Fahrzeug (nicht Jahr): die Zahl der Fahrzeuge bleibt über
+    // die Jahre klein und stabil, während Jahres-Abschnitte stetig anwachsen würden.
+    const vrmPlateOrder = sortedByRecency(state.vehicles).map(v => v.plate);
+    const vrmPlatesWithModes = [...new Set(state.vehicleRateModes.map(m => m.plate))];
+    const vrmOrderedPlates = [
+      ...vrmPlateOrder.filter(p => vrmPlatesWithModes.includes(p)),
+      ...vrmPlatesWithModes.filter(p => !vrmPlateOrder.includes(p)).sort()
+    ];
+    const vehicleRateModeRows = state.vehicleRateModes.length
+      ? vrmOrderedPlates.map(plate => `
+        <div style="margin-bottom:18px;">
+          <div style="font-weight:600; font-size:15px; margin-bottom:8px;">${escapeHtml(plate)}</div>
+          ${state.vehicleRateModes.filter(m => m.plate === plate).sort((a, b) => b.year.localeCompare(a.year)).map(vehicleRateModeRowHtml).join('')}
+        </div>`).join('')
       : `<div class="hint">Noch keine Kilometersatz-Art je Fahrzeug ausgewählt. Ohne Auswahl werden für Immobilien-Kfz-Reisen keine Kosten berechnet.</div>`;
 
     const pauschalRatesSorted = state.immoRates.filter(r => r.rateType === 'pauschal').sort((a, b) => b.validFrom.localeCompare(a.validFrom));
@@ -2832,7 +2866,15 @@
             <input type="date" id="new-rate-date" value="${escapeHtml(todayDateStr())}">
             <div class="input-suffix"><input type="text" inputmode="decimal" id="new-rate-amount" placeholder="0,30"><span class="suffix">€/km</span></div>
           </div>
-          <div class="hint">Betrag in Euro pro Kilometer, gültig ab dem gewählten Datum. Bei rückwirkenden Änderungen fragen wir nach, ob bereits erfasste Fahrten angepasst werden sollen.</div>
+          <label style="display:flex; align-items:center; gap:8px; margin-top:10px; font-weight:400; font-size:15px;">
+            <input type="checkbox" id="new-rate-uniform" checked style="width:auto;">
+            Einheitlicher Satz für alle Kilometer
+          </label>
+          <div class="field" id="new-rate-above20-field" hidden style="margin-top:10px;">
+            <label for="new-rate-above20">Ab dem 21. Kilometer</label>
+            <div class="input-suffix"><input type="text" inputmode="decimal" id="new-rate-above20" placeholder="0,38"><span class="suffix">€/km</span></div>
+          </div>
+          <div class="hint">Betrag in Euro pro Kilometer für die ersten 20 km der einfachen Entfernung, gültig ab dem gewählten Datum. Bei rückwirkenden Änderungen fragen wir nach, ob bereits erfasste Fahrten angepasst werden sollen.</div>
         </div>
         <button class="btn-secondary" id="btn-add-rate">Satz speichern</button>
       </div>
@@ -3005,6 +3047,12 @@
     });
     const addRateBtn = document.getElementById('btn-add-rate');
     if (addRateBtn) addRateBtn.addEventListener('click', addRate);
+    const rateUniformCheckbox = document.getElementById('new-rate-uniform');
+    if (rateUniformCheckbox) {
+      const above20Field = document.getElementById('new-rate-above20-field');
+      above20Field.hidden = rateUniformCheckbox.checked;
+      rateUniformCheckbox.addEventListener('change', () => { above20Field.hidden = rateUniformCheckbox.checked; });
+    }
     document.querySelectorAll('[data-del-rate]').forEach(btn => {
       btn.addEventListener('click', () => deleteRate(btn.getAttribute('data-del-rate')));
     });
