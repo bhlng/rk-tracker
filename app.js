@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.13.1';
+  const APP_VERSION = '3.13.2';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -711,6 +711,7 @@
               <div class="input-suffix"><input type="text" inputmode="decimal" id="vc-yearly-amount" placeholder="0,00" value="${existing && existing.usefulLifeYears ? escapeHtml((existing.amount / existing.usefulLifeYears).toFixed(2).replace('.', ',')) : ''}"><span class="suffix">€/Jahr</span></div>
             </div>
             <div class="hint">Eine der beiden Angaben genügt, die andere wird automatisch berechnet. Neuwagen: gewöhnliche Nutzungsdauer 6 Jahre. Gebrauchtwagen: verkürzte Restnutzungsdauer je nach Alter/Zustand (z. B. 3 Jahre alt → meist 3 Jahre).</div>
+            <div class="hint" id="vc-current-year-preview" style="margin-top:8px;"></div>
           </div>
           <div class="field" style="margin-top:10px;">
             <label for="vc-note">Notiz (optional)</label>
@@ -727,9 +728,11 @@
     const depField = backdrop.querySelector('#vc-depreciation-field');
     const dateLabel = backdrop.querySelector('#vc-date-label');
     const amountLabel = backdrop.querySelector('#vc-amount-label');
+    const dateInput = backdrop.querySelector('#vc-date');
     const amountInput = backdrop.querySelector('#vc-amount');
     const yearsInput = backdrop.querySelector('#vc-useful-years');
     const yearlyInput = backdrop.querySelector('#vc-yearly-amount');
+    const currentYearPreview = backdrop.querySelector('#vc-current-year-preview');
     let depMode = 'years'; // 'years' | 'yearly' — welches der beiden Felder zuletzt vom Nutzer editiert wurde
 
     function updateLabels() {
@@ -741,20 +744,49 @@
     updateLabels();
     categorySelect.addEventListener('change', updateLabels);
 
+    // Zeigt, was die Eingaben für DIESES Jahr tatsächlich bedeuten — insbesondere, wenn
+    // der Wagen laut Nutzungsdauer bereits (oder noch nicht) abgeschrieben ist, damit das
+    // nicht erst nach dem Speichern überrascht.
+    function updateCurrentYearPreview() {
+      const dateVal = dateInput.value;
+      const amount = parseFloat(amountInput.value.replace(',', '.'));
+      const years = parseFloat(yearsInput.value.replace(',', '.'));
+      if (!dateVal || isNaN(amount) || amount <= 0 || isNaN(years) || years <= 0) {
+        currentYearPreview.innerHTML = '';
+        return;
+      }
+      const fakeCost = { date: dateVal, amount, usefulLifeYears: years };
+      const currentYear = String(new Date().getFullYear());
+      const totalMonths = Math.round(years * 12);
+      const months = depreciationMonthsInYear(fakeCost, currentYear);
+      if (months === 0) {
+        const purchaseYear = Number(dateVal.slice(0, 4));
+        const notYetStarted = Number(currentYear) < purchaseYear;
+        currentYearPreview.innerHTML = `<span class="warn-text">Abschreibung ${currentYear}: 0,00 € — ${notYetStarted ? 'der Zeitraum beginnt erst ' + purchaseYear : 'das Fahrzeug ist laut diesen Angaben bereits vollständig abgeschrieben'}.</span>`;
+      } else {
+        const amountThisYear = Math.round((amount / totalMonths) * months * 100) / 100;
+        currentYearPreview.textContent = `Abschreibung ${currentYear}: ${formatEuro(amountThisYear)}${months < 12 ? ' (Teiljahr, ' + months + ' Monate)' : ''}`;
+      }
+    }
+
     function recomputeDepreciation() {
       const amount = parseFloat(amountInput.value.replace(',', '.'));
-      if (isNaN(amount) || amount <= 0) return;
-      if (depMode === 'years') {
-        const years = parseFloat(yearsInput.value.replace(',', '.'));
-        if (years > 0) yearlyInput.value = (amount / years).toFixed(2).replace('.', ',');
-      } else {
-        const yearly = parseFloat(yearlyInput.value.replace(',', '.'));
-        if (yearly > 0) yearsInput.value = (amount / yearly).toFixed(1).replace('.', ',');
+      if (!isNaN(amount) && amount > 0) {
+        if (depMode === 'years') {
+          const years = parseFloat(yearsInput.value.replace(',', '.'));
+          if (years > 0) yearlyInput.value = (amount / years).toFixed(2).replace('.', ',');
+        } else {
+          const yearly = parseFloat(yearlyInput.value.replace(',', '.'));
+          if (yearly > 0) yearsInput.value = (amount / yearly).toFixed(1).replace('.', ',');
+        }
       }
+      updateCurrentYearPreview();
     }
     amountInput.addEventListener('input', recomputeDepreciation);
     yearsInput.addEventListener('input', () => { depMode = 'years'; recomputeDepreciation(); });
     yearlyInput.addEventListener('input', () => { depMode = 'yearly'; recomputeDepreciation(); });
+    dateInput.addEventListener('input', updateCurrentYearPreview);
+    updateCurrentYearPreview();
 
     backdrop.querySelector('#vehicle-cost-form').addEventListener('submit', (e) => {
       e.preventDefault();
