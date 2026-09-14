@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.12.1';
+  const APP_VERSION = '3.13.1';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -28,18 +28,20 @@
   const RATE_TYPE_LABELS = { pauschal: 'Pauschal', tatsaechlich: 'Tatsächliche Kosten', tabelle: 'ADAC-Tabelle' };
   const ADAC_KOSTEN_URL = 'https://www.adac.de/rund-ums-fahrzeug/auto-kaufen-verkaufen/autokosten/';
   const PENDLERPAUSCHALE_THRESHOLD_KM = 20; // ab dem 21. Kilometer gilt ggf. ein höherer Satz
+  // Reihenfolge bewusst nach Erfassungshäufigkeit (häufige Positionen zuerst,
+  // Abschreibung als einmaliger Vorgang je Fahrzeug zuletzt).
   const VEHICLE_COST_CATEGORIES = {
-    abschreibung: 'Wertverlust / Abschreibung',
+    kraftstoff_energie: 'Kraftstoff / Strom-Ladekosten',
     leasingrate: 'Leasingrate',
     finanzierung_zinsen: 'Finanzierungskosten (Zinsen)',
-    versicherung: 'Kfz-Versicherung (Haftpflicht, Teil-/Vollkasko, Schutzbrief)',
-    kfz_steuer: 'Kfz-Steuer',
-    kraftstoff_energie: 'Kraftstoff / Strom-Ladekosten',
     wartung_reparaturen: 'Wartung/Inspektion, Reparaturen, Verschleißteile',
     reifen: 'Reifen (Wechsel, Auswuchten)',
-    tuev_hu_au: 'TÜV/DEKRA (HU/AU) u. ä. Gebühren',
     nebenkosten: 'Kfz-Nebenkosten (Zulassung, Kennzeichen, Wagenwäsche)',
-    sonstiges: 'Sonstiges'
+    tuev_hu_au: 'TÜV/DEKRA (HU/AU) u. ä. Gebühren',
+    versicherung: 'Kfz-Versicherung (Haftpflicht, Teil-/Vollkasko, Schutzbrief)',
+    kfz_steuer: 'Kfz-Steuer',
+    sonstiges: 'Sonstiges',
+    abschreibung: 'Wertverlust / Abschreibung'
   };
 
   function loadKey(key) {
@@ -393,26 +395,75 @@
   }
 
   // ---------- Kilometersatz / Kosten ----------
+  // Monatsgenaue lineare AfA (Pro-rata-temporis, wie in der deutschen Steuerpraxis):
+  // der Kaufmonat zählt als voller Monat, unabhängig vom Kauftag. Die Gesamtdauer in
+  // Monaten (Nutzungsdauer × 12) bestimmt, wie viele Monate im angefragten Jahr
+  // abgeschrieben werden — im ersten und ggf. letzten Jahr nur anteilig.
+  function depreciationMonthsInYear(c, year) {
+    const purchaseYear = Number((c.date || '').slice(0, 4));
+    const purchaseMonth = parseInt((c.date || '').slice(5, 7), 10);
+    const totalMonths = Math.round((c.usefulLifeYears || 0) * 12);
+    if (!purchaseYear || !purchaseMonth || totalMonths <= 0) return 0;
+    const janIdx = (Number(year) - purchaseYear) * 12 + (1 - purchaseMonth);
+    const decIdx = janIdx + 11;
+    const lo = Math.max(0, janIdx);
+    const hi = Math.min(totalMonths - 1, decIdx);
+    return Math.max(0, hi - lo + 1);
+  }
+
   // Summe der Kostenpositionen eines Fahrzeugs für ein Jahr, inklusive anteiliger
-  // linearer Abschreibung (Anschaffungspreis ÷ Nutzungsdauer, endet nach Ablauf der Jahre).
+  // monatsgenauer Abschreibung (siehe depreciationMonthsInYear).
   function totalActualCostsForVehicleYear(plate, year) {
     let sum = 0;
     for (const c of state.vehicleCosts) {
       if (c.plate !== plate) continue;
       if (c.category === 'abschreibung') {
-        const purchaseYear = (c.date || '').slice(0, 4);
-        const years = c.usefulLifeYears || 0;
-        if (purchaseYear && years > 0) {
-          const yearsSincePurchase = Number(year) - Number(purchaseYear);
-          if (yearsSincePurchase >= 0 && yearsSincePurchase < years) {
-            sum += (c.amount || 0) / years;
-          }
+        const totalMonths = Math.round((c.usefulLifeYears || 0) * 12);
+        if (totalMonths > 0) {
+          sum += (c.amount || 0) / totalMonths * depreciationMonthsInYear(c, year);
         }
       } else if ((c.date || '').slice(0, 4) === year) {
         sum += c.amount || 0;
       }
     }
     return Math.round(sum * 100) / 100;
+  }
+
+  // Jahresweise Aufschlüsselung einer Abschreibungs-Position (für die transparente Anzeige).
+  function depreciationYearBreakdown(c) {
+    const purchaseYear = Number((c.date || '').slice(0, 4));
+    const totalMonths = Math.round((c.usefulLifeYears || 0) * 12);
+    if (!purchaseYear || totalMonths <= 0) return [];
+    const monthlyAmount = c.amount / totalMonths;
+    const entries = [];
+    for (let y = purchaseYear; y <= purchaseYear + Math.ceil(totalMonths / 12) + 1; y++) {
+      const months = depreciationMonthsInYear(c, String(y));
+      if (months > 0) entries.push({ year: y, months, amount: Math.round(monthlyAmount * months * 100) / 100 });
+    }
+    return entries;
+  }
+
+  // Kompakte Textdarstellung: erstes Jahr, zusammengefasste volle Jahre, letztes Jahr —
+  // nicht jedes Jahr einzeln, aber Anfang/Ende und Höhe des vollen Jahresbetrags sichtbar.
+  function depreciationScheduleText(c) {
+    const entries = depreciationYearBreakdown(c);
+    if (!entries.length) return '';
+    const totalMonths = Math.round((c.usefulLifeYears || 0) * 12);
+    const fullYearAmount = Math.round((c.amount / totalMonths) * 12 * 100) / 100;
+    const parts = [];
+    let i = 0;
+    while (i < entries.length) {
+      if (entries[i].months === 12) {
+        let j = i;
+        while (j + 1 < entries.length && entries[j + 1].months === 12) j++;
+        parts.push(j > i ? `${entries[i].year}–${entries[j].year}: je ${formatEuro(fullYearAmount)}` : `${entries[i].year}: ${formatEuro(fullYearAmount)}`);
+        i = j + 1;
+      } else {
+        parts.push(`${entries[i].year}: ${formatEuro(entries[i].amount)} (${entries[i].months} Monate)`);
+        i++;
+      }
+    }
+    return parts.join(' · ');
   }
 
   // Zerlegt die Gesamt-Jahresfahrleistung eines Fahrzeugs in die bereits in der App
@@ -2977,6 +3028,7 @@
             <div>
               <div>${escapeHtml(VEHICLE_COST_CATEGORIES[c.category] || c.category)}</div>
               <div class="sub">${formatDateOnly(c.date)} · ${formatEuro(c.amount)}${c.category === 'abschreibung' && c.usefulLifeYears ? ' · ' + c.usefulLifeYears + ' Jahre Nutzungsdauer' : ''}${c.note ? ' · ' + escapeHtml(c.note) : ''}</div>
+              ${c.category === 'abschreibung' ? `<div class="hint" style="margin:4px 0 0;">${depreciationScheduleText(c)}</div>` : ''}
             </div>
             <div style="display:flex; gap:16px;">
               <button class="btn-text" data-edit-vehicle-cost="${escapeHtml(c.id)}">Bearbeiten</button>
@@ -2994,7 +3046,7 @@
       } else if (m.rateType === 'tabelle') {
         inner = `
           <div style="background:var(--bg-elevated-2); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:8px;">
-            <div class="hint" style="margin:0;">Werte gemäß <a href="${ADAC_KOSTEN_URL}" target="_blank" rel="noopener">ADAC-Kostentabelle ↗ (externer Link, öffnet in neuem Tab)</a> für Marke/Modell/Alter dieses Fahrzeugs.</div>
+            <div class="hint" style="margin:0;">Werte gemäß <a href="${ADAC_KOSTEN_URL}" target="_blank" rel="noopener">↗ ADAC-Kostentabelle (externer Link)</a> für Marke/Modell/Alter dieses Fahrzeugs.</div>
             ${tabelleRatesForPlateHtml(m.plate)}
             <div class="two-col">
               <input type="date" id="tabelle-date-${escapeHtml(m.id)}" value="${escapeHtml(todayDateStr())}">
@@ -3034,19 +3086,21 @@
 
     // Gruppiert nach Fahrzeug (nicht Jahr): die Zahl der Fahrzeuge bleibt über
     // die Jahre klein und stabil, während Jahres-Abschnitte stetig anwachsen würden.
-    const vrmPlateOrder = sortedByRecency(state.vehicles).map(v => v.plate);
-    const vrmPlatesWithModes = [...new Set(state.vehicleRateModes.map(m => m.plate))];
-    const vrmOrderedPlates = [
-      ...vrmPlateOrder.filter(p => vrmPlatesWithModes.includes(p)),
-      ...vrmPlatesWithModes.filter(p => !vrmPlateOrder.includes(p)).sort()
-    ];
-    const vehicleRateModeRows = state.vehicleRateModes.length
-      ? vrmOrderedPlates.map(plate => `
+    // Eine Karte je Fahrzeug (nicht nur Fahrzeuge mit bereits gewählter Art) — deckt
+    // damit auch die Kennzeichen-Verwaltung selbst ab (Löschen), analog zu vehRows.
+    const vehicleRateModeRows = state.vehicles.length
+      ? sortedByRecency(state.vehicles).map(v => {
+        const modesForPlate = state.vehicleRateModes.filter(m => m.plate === v.plate).sort((a, b) => b.year.localeCompare(a.year));
+        return `
         <div style="margin-bottom:18px;">
-          <div style="font-weight:600; font-size:15px; margin-bottom:8px;">${escapeHtml(plate)}</div>
-          ${state.vehicleRateModes.filter(m => m.plate === plate).sort((a, b) => b.year.localeCompare(a.year)).map(vehicleRateModeRowHtml).join('')}
-        </div>`).join('')
-      : `<div class="hint">Noch keine Kilometersatz-Art je Fahrzeug ausgewählt. Ohne Auswahl werden für Immobilien-Kfz-Reisen keine Kosten berechnet.</div>`;
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <div style="font-weight:600; font-size:15px;">${escapeHtml(v.plate)}</div>
+            <button class="btn-danger" data-del-veh="${escapeHtml(v.plate)}">Löschen</button>
+          </div>
+          ${modesForPlate.length ? modesForPlate.map(vehicleRateModeRowHtml).join('') : `<div class="hint" style="margin:0;">Noch keine Kilometersatz-Art für dieses Fahrzeug ausgewählt.</div>`}
+        </div>`;
+      }).join('')
+      : `<div class="hint">Noch keine Kennzeichen gespeichert.</div>`;
 
     const pauschalRatesSorted = state.immoRates.filter(r => r.rateType === 'pauschal').sort((a, b) => b.validFrom.localeCompare(a.validFrom));
     const immoRateRows = pauschalRatesSorted.length
@@ -3144,8 +3198,9 @@
       <div class="section-title">Gespeicherte Adressen</div>
       <div class="card">${locRows}</div>
 
+      ${currentContext === 'pendeln' ? `
       <div class="section-title">Gespeicherte Kennzeichen</div>
-      <div class="card">${vehRows}</div>
+      <div class="card">${vehRows}</div>` : ''}
 
       ${currentContext === 'immobilien' ? `
       <div class="section-title">Gespeicherte Objekte</div>
@@ -3169,9 +3224,9 @@
         <button class="btn-secondary" id="btn-add-immo-rate">Satz speichern</button>
       </div>
 
-      <div class="section-title">Kilometersatz-Art je Fahrzeug (Immobilien, privat)</div>
+      <div class="section-title">Fahrzeuge (Immobilien, privat)</div>
       <div class="card">
-        <div class="hint" style="margin:0 0 14px;">Gilt nur für Immobilien-Fahrten (privat) — Pendeln-Reisen mit demselben Fahrzeug sind davon nicht betroffen.</div>
+        <div class="hint" style="margin:0 0 14px;">Kennzeichen sind ein gemeinsamer Pool mit Pendeln — Löschen hier entfernt das Fahrzeug komplett. Die Kilometersatz-Art gilt dagegen nur für Immobilien-Fahrten (privat), Pendeln-Reisen mit demselben Fahrzeug sind davon nicht betroffen.</div>
         ${vehicleRateModeRows}
         <div class="field" style="margin-top:16px;">
           <label>Neue Auswahl</label>
