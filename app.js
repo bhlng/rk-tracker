@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.12.0';
+  const APP_VERSION = '3.12.1';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -646,17 +646,20 @@
             </select>
           </div>
           <div class="field" style="margin-top:10px;">
-            <label for="vc-date">Datum</label>
+            <label for="vc-date" id="vc-date-label">Datum</label>
             <input type="date" id="vc-date" value="${escapeHtml(existing ? existing.date : todayDateStr())}">
           </div>
           <div class="field" style="margin-top:10px;">
-            <label for="vc-amount">Betrag</label>
+            <label for="vc-amount" id="vc-amount-label">Betrag</label>
             <div class="input-suffix"><input type="text" inputmode="decimal" id="vc-amount" placeholder="0,00" value="${existing ? escapeHtml(String(existing.amount).replace('.', ',')) : ''}"><span class="suffix">€</span></div>
           </div>
           <div class="field" id="vc-depreciation-field" ${!(existing && existing.category === 'abschreibung') ? 'hidden' : ''} style="margin-top:10px;">
-            <label for="vc-depreciation">Nutzungsdauer</label>
-            <div class="input-suffix"><input type="text" inputmode="numeric" id="vc-depreciation" placeholder="6" value="${existing && existing.usefulLifeYears != null ? escapeHtml(String(existing.usefulLifeYears)) : '6'}"><span class="suffix">Jahre</span></div>
-            <div class="hint">Neuwagen: gewöhnliche Nutzungsdauer 6 Jahre. Gebrauchtwagen: verkürzte Restnutzungsdauer je nach Alter/Zustand (z. B. 3 Jahre alt → meist 3 Jahre). Der Betrag wird ab dem Kaufjahr linear über diese Anzahl Jahre verteilt.</div>
+            <label>Nutzungsdauer / jährliche Abschreibung</label>
+            <div class="two-col">
+              <div class="input-suffix"><input type="text" inputmode="numeric" id="vc-useful-years" placeholder="6" value="${existing && existing.usefulLifeYears != null ? escapeHtml(String(existing.usefulLifeYears)) : '6'}"><span class="suffix">Jahre</span></div>
+              <div class="input-suffix"><input type="text" inputmode="decimal" id="vc-yearly-amount" placeholder="0,00" value="${existing && existing.usefulLifeYears ? escapeHtml((existing.amount / existing.usefulLifeYears).toFixed(2).replace('.', ',')) : ''}"><span class="suffix">€/Jahr</span></div>
+            </div>
+            <div class="hint">Eine der beiden Angaben genügt, die andere wird automatisch berechnet. Neuwagen: gewöhnliche Nutzungsdauer 6 Jahre. Gebrauchtwagen: verkürzte Restnutzungsdauer je nach Alter/Zustand (z. B. 3 Jahre alt → meist 3 Jahre).</div>
           </div>
           <div class="field" style="margin-top:10px;">
             <label for="vc-note">Notiz (optional)</label>
@@ -671,16 +674,55 @@
     backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeSheet(); });
     const categorySelect = backdrop.querySelector('#vc-category');
     const depField = backdrop.querySelector('#vc-depreciation-field');
-    depField.hidden = categorySelect.value !== 'abschreibung';
-    categorySelect.addEventListener('change', () => { depField.hidden = categorySelect.value !== 'abschreibung'; });
+    const dateLabel = backdrop.querySelector('#vc-date-label');
+    const amountLabel = backdrop.querySelector('#vc-amount-label');
+    const amountInput = backdrop.querySelector('#vc-amount');
+    const yearsInput = backdrop.querySelector('#vc-useful-years');
+    const yearlyInput = backdrop.querySelector('#vc-yearly-amount');
+    let depMode = 'years'; // 'years' | 'yearly' — welches der beiden Felder zuletzt vom Nutzer editiert wurde
+
+    function updateLabels() {
+      const isAbschreibung = categorySelect.value === 'abschreibung';
+      depField.hidden = !isAbschreibung;
+      dateLabel.textContent = isAbschreibung ? 'Kaufdatum' : 'Datum';
+      amountLabel.textContent = isAbschreibung ? 'Kaufpreis' : 'Betrag';
+    }
+    updateLabels();
+    categorySelect.addEventListener('change', updateLabels);
+
+    function recomputeDepreciation() {
+      const amount = parseFloat(amountInput.value.replace(',', '.'));
+      if (isNaN(amount) || amount <= 0) return;
+      if (depMode === 'years') {
+        const years = parseFloat(yearsInput.value.replace(',', '.'));
+        if (years > 0) yearlyInput.value = (amount / years).toFixed(2).replace('.', ',');
+      } else {
+        const yearly = parseFloat(yearlyInput.value.replace(',', '.'));
+        if (yearly > 0) yearsInput.value = (amount / yearly).toFixed(1).replace('.', ',');
+      }
+    }
+    amountInput.addEventListener('input', recomputeDepreciation);
+    yearsInput.addEventListener('input', () => { depMode = 'years'; recomputeDepreciation(); });
+    yearlyInput.addEventListener('input', () => { depMode = 'yearly'; recomputeDepreciation(); });
+
     backdrop.querySelector('#vehicle-cost-form').addEventListener('submit', (e) => {
       e.preventDefault();
       const category = categorySelect.value;
+      const amount = parseFloat(amountInput.value.replace(',', '.'));
+      let usefulLifeYears = null;
+      if (category === 'abschreibung') {
+        if (depMode === 'years') {
+          usefulLifeYears = parseFloat(yearsInput.value.replace(',', '.'));
+        } else {
+          const yearly = parseFloat(yearlyInput.value.replace(',', '.'));
+          usefulLifeYears = (amount > 0 && yearly > 0) ? amount / yearly : NaN;
+        }
+      }
       saveVehicleCost(plate, costId, {
         category,
         date: backdrop.querySelector('#vc-date').value,
-        amount: parseFloat(backdrop.querySelector('#vc-amount').value.replace(',', '.')),
-        usefulLifeYears: category === 'abschreibung' ? parseInt(backdrop.querySelector('#vc-depreciation').value, 10) : null,
+        amount,
+        usefulLifeYears,
         note: backdrop.querySelector('#vc-note').value.trim() || null
       });
     });
