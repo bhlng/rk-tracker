@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.13.4';
+  const APP_VERSION = '3.13.5';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -3110,14 +3110,18 @@
         const otherKm = m.totalKm != null ? Math.max(0, Math.round((m.totalKm - kmBreakdown.pendelnKm - kmBreakdown.immoKm) * 10) / 10) : null;
         inner = `
           <div style="background:var(--bg-elevated-2); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:8px;">
+            <div style="text-align:center; background:var(--bg-elevated); border-radius:10px; padding:14px 10px;">
+              <div style="font-size:11px; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.5px;">Summe ${escapeHtml(m.year)}</div>
+              <div style="font-size:30px; font-weight:700; color:var(--accent); line-height:1.2;">${formatEuro(totalCostForYear)}</div>
+              ${ratePreview != null ? `<div style="font-size:13px; color:var(--text-dim); margin-top:2px;">÷ ${m.totalKm} km = ${ratePreview.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 4 })} €/km</div>` : ''}
+            </div>
             <div class="field" style="margin:0;">
               <label for="totalkm-${escapeHtml(m.id)}">Gesamt-Jahresfahrleistung</label>
               <div class="input-suffix"><input type="text" inputmode="decimal" id="totalkm-${escapeHtml(m.id)}" value="${m.totalKm != null ? m.totalKm : ''}" placeholder="20000"><span class="suffix">km</span></div>
             </div>
             <button class="btn-text" data-save-totalkm-for="${escapeHtml(m.id)}">Speichern</button>
             <div class="hint" style="margin:0;">Davon Pendeln: ${kmBreakdown.pendelnKm} km · Immobilien (privat): ${kmBreakdown.immoKm} km${otherKm != null ? ' · sonstige Privatfahrten: ' + otherKm + ' km' : ''}</div>
-            ${ratePreview != null ? `<div class="hint" style="margin:0;">Kosten ${escapeHtml(m.year)}: ${formatEuro(totalCostForYear)} ÷ ${m.totalKm} km = ${ratePreview.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 4 })} €/km</div>` : ''}
-            <div class="hint" style="margin:8px 0 0;"><strong>Summe ${escapeHtml(m.year)}: ${formatEuro(totalCostForYear)}</strong> — Kostenpositionen dieses Fahrzeugs (gelten fahrzeugweit, nicht nur für dieses Jahr):</div>
+            <div class="hint" style="margin:8px 0 0;">Kostenpositionen dieses Fahrzeugs (gelten fahrzeugweit, nicht nur für dieses Jahr):</div>
             ${vehicleCostRowsForPlateHtml(m.plate, m.year)}
             <button class="btn-secondary" data-add-vehicle-cost-for="${escapeHtml(m.plate)}" data-context-year="${escapeHtml(m.year)}">+ Kosten erfassen</button>
           </div>`;

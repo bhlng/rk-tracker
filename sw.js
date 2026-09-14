@@ -1,4 +1,4 @@
-const CACHE_NAME = 'reisekosten-tracker-v3.13.4';
+const CACHE_NAME = 'reisekosten-tracker-v3.13.5';
 const APP_SHELL = [
   './index.html',
   './styles.css',
