@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.13.2';
+  const APP_VERSION = '3.13.3';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -25,7 +25,7 @@
     settings: { orsApiKey: '', homeLocationId: null, workLocationId: null }
   };
 
-  const RATE_TYPE_LABELS = { pauschal: 'Pauschal', tatsaechlich: 'Tatsächliche Kosten', tabelle: 'ADAC-Tabelle' };
+  const RATE_TYPE_LABELS = { pauschal: 'Pauschal', tatsaechlich: 'Tatsächliche Kosten', tabelle: 'Autokosten lt. ADAC' };
   const ADAC_KOSTEN_URL = 'https://www.adac.de/rund-ums-fahrzeug/auto-kaufen-verkaufen/autokosten/';
   const PENDLERPAUSCHALE_THRESHOLD_KM = 20; // ab dem 21. Kilometer gilt ggf. ein höherer Satz
   // Reihenfolge bewusst nach Erfassungshäufigkeit (häufige Positionen zuerst,
@@ -676,7 +676,7 @@
     render();
   }
 
-  function openVehicleCostEditor(plate, costId) {
+  function openVehicleCostEditor(plate, costId, contextYear) {
     closeSheet();
     const existing = costId ? state.vehicleCosts.find(c => c.id === costId) : null;
     const backdrop = document.createElement('div');
@@ -735,18 +735,24 @@
     const currentYearPreview = backdrop.querySelector('#vc-current-year-preview');
     let depMode = 'years'; // 'years' | 'yearly' — welches der beiden Felder zuletzt vom Nutzer editiert wurde
 
+    // Das Jahr, für das die Vorschau gilt: das Jahr der Fahrzeug-Zeile, aus der der Dialog
+    // geöffnet wurde (nicht das heutige Kalenderjahr) — dieselbe Kostenposition kann je
+    // nach Zeile, aus der man sie öffnet, ein anderes Jahr betreffen.
+    const previewYear = contextYear || String(new Date().getFullYear());
+
     function updateLabels() {
       const isAbschreibung = categorySelect.value === 'abschreibung';
       depField.hidden = !isAbschreibung;
       dateLabel.textContent = isAbschreibung ? 'Kaufdatum' : 'Datum';
       amountLabel.textContent = isAbschreibung ? 'Kaufpreis' : 'Betrag';
+      updateCurrentYearPreview();
     }
     updateLabels();
     categorySelect.addEventListener('change', updateLabels);
 
-    // Zeigt, was die Eingaben für DIESES Jahr tatsächlich bedeuten — insbesondere, wenn
-    // der Wagen laut Nutzungsdauer bereits (oder noch nicht) abgeschrieben ist, damit das
-    // nicht erst nach dem Speichern überrascht.
+    // Zeigt, was die Eingaben für das Jahr der aufrufenden Zeile (previewYear) tatsächlich
+    // bedeuten — insbesondere, wenn der Wagen laut Nutzungsdauer in diesem Jahr bereits
+    // (oder noch nicht) abgeschrieben ist, damit das nicht erst nach dem Speichern überrascht.
     function updateCurrentYearPreview() {
       const dateVal = dateInput.value;
       const amount = parseFloat(amountInput.value.replace(',', '.'));
@@ -756,16 +762,15 @@
         return;
       }
       const fakeCost = { date: dateVal, amount, usefulLifeYears: years };
-      const currentYear = String(new Date().getFullYear());
       const totalMonths = Math.round(years * 12);
-      const months = depreciationMonthsInYear(fakeCost, currentYear);
+      const months = depreciationMonthsInYear(fakeCost, previewYear);
       if (months === 0) {
         const purchaseYear = Number(dateVal.slice(0, 4));
-        const notYetStarted = Number(currentYear) < purchaseYear;
-        currentYearPreview.innerHTML = `<span class="warn-text">Abschreibung ${currentYear}: 0,00 € — ${notYetStarted ? 'der Zeitraum beginnt erst ' + purchaseYear : 'das Fahrzeug ist laut diesen Angaben bereits vollständig abgeschrieben'}.</span>`;
+        const notYetStarted = Number(previewYear) < purchaseYear;
+        currentYearPreview.innerHTML = `<span class="warn-text">Abschreibung ${escapeHtml(previewYear)}: 0,00 € — ${notYetStarted ? 'der Zeitraum beginnt erst ' + purchaseYear : 'das Fahrzeug ist laut diesen Angaben bereits vollständig abgeschrieben'}.</span>`;
       } else {
         const amountThisYear = Math.round((amount / totalMonths) * months * 100) / 100;
-        currentYearPreview.textContent = `Abschreibung ${currentYear}: ${formatEuro(amountThisYear)}${months < 12 ? ' (Teiljahr, ' + months + ' Monate)' : ''}`;
+        currentYearPreview.textContent = `Abschreibung ${previewYear}: ${formatEuro(amountThisYear)}${months < 12 ? ' (Teiljahr, ' + months + ' Monate)' : ''}`;
       }
     }
 
@@ -2039,7 +2044,7 @@
             <select id="rate-type-input">
               <option value="pauschal" ${draft.rateType === 'pauschal' ? 'selected' : ''}>Pauschal</option>
               <option value="tatsaechlich" ${draft.rateType === 'tatsaechlich' ? 'selected' : ''}>Tatsächliche Kosten</option>
-              <option value="tabelle" ${draft.rateType === 'tabelle' ? 'selected' : ''}>ADAC-Tabelle</option>
+              <option value="tabelle" ${draft.rateType === 'tabelle' ? 'selected' : ''}>Autokosten lt. ADAC</option>
             </select>
           </div>` : ''}
           <button type="submit" class="btn-primary" id="rate-save">Speichern</button>
@@ -3052,21 +3057,33 @@
       return rows || `<div class="hint" style="margin:0;">Noch kein Tabellen-Satz für dieses Fahrzeug hinterlegt.</div>`;
     };
 
-    const vehicleCostRowsForPlateHtml = (plate) => {
+    const vehicleCostRowsForPlateHtml = (plate, year) => {
       const rows = state.vehicleCosts.filter(c => c.plate === plate)
         .sort((a, b) => b.date.localeCompare(a.date))
-        .map(c => `
+        .map(c => {
+          let depreciationInfo = '';
+          if (c.category === 'abschreibung') {
+            const totalMonths = Math.round((c.usefulLifeYears || 0) * 12);
+            const monthsThisYear = totalMonths > 0 ? depreciationMonthsInYear(c, year) : 0;
+            const amountThisYear = totalMonths > 0 ? Math.round((c.amount / totalMonths) * monthsThisYear * 100) / 100 : 0;
+            const thisYearClass = monthsThisYear === 0 ? ' class="warn-text"' : '';
+            depreciationInfo = `
+              <div class="hint" style="margin:4px 0 0;"><strong${thisYearClass}>Davon ${escapeHtml(year)}: ${formatEuro(amountThisYear)}</strong>${monthsThisYear > 0 && monthsThisYear < 12 ? ' (Teiljahr, ' + monthsThisYear + ' Monate)' : ''}</div>
+              <div class="hint" style="margin:2px 0 0;">${depreciationScheduleText(c)}</div>`;
+          }
+          return `
           <div class="manage-row" style="flex-direction:column; align-items:stretch; gap:8px; padding:8px 0;">
             <div>
               <div>${escapeHtml(VEHICLE_COST_CATEGORIES[c.category] || c.category)}</div>
               <div class="sub">${formatDateOnly(c.date)} · ${formatEuro(c.amount)}${c.category === 'abschreibung' && c.usefulLifeYears ? ' · ' + c.usefulLifeYears + ' Jahre Nutzungsdauer' : ''}${c.note ? ' · ' + escapeHtml(c.note) : ''}</div>
-              ${c.category === 'abschreibung' ? `<div class="hint" style="margin:4px 0 0;">${depreciationScheduleText(c)}</div>` : ''}
+              ${depreciationInfo}
             </div>
             <div style="display:flex; gap:16px;">
-              <button class="btn-text" data-edit-vehicle-cost="${escapeHtml(c.id)}">Bearbeiten</button>
+              <button class="btn-text" data-edit-vehicle-cost="${escapeHtml(c.id)}" data-context-year="${escapeHtml(year)}">Bearbeiten</button>
               <button class="btn-danger" data-del-vehicle-cost="${escapeHtml(c.id)}">Löschen</button>
             </div>
-          </div>`).join('');
+          </div>`;
+        }).join('');
       return rows || `<div class="hint" style="margin:0;">Noch keine Kostenpositionen für dieses Fahrzeug erfasst.</div>`;
     };
 
@@ -3101,8 +3118,8 @@
             <div class="hint" style="margin:0;">Davon Pendeln: ${kmBreakdown.pendelnKm} km · Immobilien (privat): ${kmBreakdown.immoKm} km${otherKm != null ? ' · sonstige Privatfahrten: ' + otherKm + ' km' : ''}</div>
             ${ratePreview != null ? `<div class="hint" style="margin:0;">Kosten ${escapeHtml(m.year)}: ${formatEuro(totalCostForYear)} ÷ ${m.totalKm} km = ${ratePreview.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 4 })} €/km</div>` : ''}
             <div class="hint" style="margin:8px 0 0;">Kostenpositionen dieses Fahrzeugs (gelten fahrzeugweit, nicht nur für dieses Jahr):</div>
-            ${vehicleCostRowsForPlateHtml(m.plate)}
-            <button class="btn-secondary" data-add-vehicle-cost-for="${escapeHtml(m.plate)}">+ Kosten erfassen</button>
+            ${vehicleCostRowsForPlateHtml(m.plate, m.year)}
+            <button class="btn-secondary" data-add-vehicle-cost-for="${escapeHtml(m.plate)}" data-context-year="${escapeHtml(m.year)}">+ Kosten erfassen</button>
           </div>`;
       }
       return `
@@ -3275,7 +3292,7 @@
             <select id="new-vrm-type">
               <option value="pauschal">Pauschal</option>
               <option value="tatsaechlich">Tatsächliche Kosten</option>
-              <option value="tabelle">ADAC-Tabelle</option>
+              <option value="tabelle">Autokosten lt. ADAC</option>
             </select>
           </div>
           <div class="field" id="new-vrm-totalkm-field" hidden style="margin-top:10px;">
@@ -3379,12 +3396,12 @@
       btn.addEventListener('click', () => saveVehicleRateModeTotalKm(btn.getAttribute('data-save-totalkm-for')));
     });
     document.querySelectorAll('[data-add-vehicle-cost-for]').forEach(btn => {
-      btn.addEventListener('click', () => openVehicleCostEditor(btn.getAttribute('data-add-vehicle-cost-for'), null));
+      btn.addEventListener('click', () => openVehicleCostEditor(btn.getAttribute('data-add-vehicle-cost-for'), null, btn.getAttribute('data-context-year')));
     });
     document.querySelectorAll('[data-edit-vehicle-cost]').forEach(btn => {
       btn.addEventListener('click', () => {
         const cost = state.vehicleCosts.find(c => c.id === btn.getAttribute('data-edit-vehicle-cost'));
-        if (cost) openVehicleCostEditor(cost.plate, cost.id);
+        if (cost) openVehicleCostEditor(cost.plate, cost.id, btn.getAttribute('data-context-year'));
       });
     });
     document.querySelectorAll('[data-del-vehicle-cost]').forEach(btn => {
