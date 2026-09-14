@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.13.6';
+  const APP_VERSION = '3.14.0';
   const PIN_ICON = '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 21s-7-6.5-7-11a7 7 0 0114 0c0 4.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="2"/></svg>';
   const STORAGE_PREFIX = 'rkt:';
   const ORS_BASE = 'https://api.openrouteservice.org';
@@ -22,12 +22,23 @@
     immoRates: [],
     vehicleRateModes: [],
     vehicleCosts: [],
+    pendelOepvCosts: [],
     settings: { orsApiKey: '', homeLocationId: null, workLocationId: null }
   };
 
   const RATE_TYPE_LABELS = { pauschal: 'Pauschal', tatsaechlich: 'Tatsächliche Kosten', tabelle: 'Autokosten lt. ADAC' };
   const ADAC_KOSTEN_URL = 'https://www.adac.de/rund-ums-fahrzeug/auto-kaufen-verkaufen/autokosten/';
   const PENDLERPAUSCHALE_THRESHOLD_KM = 20; // ab dem 21. Kilometer gilt ggf. ein höherer Satz
+  const PENDLERPAUSCHALE_CAP_OHNE_PKW = 4500; // Deckel/Jahr, entfällt nur bei ausschließlicher Nutzung von eigenem/Dienst-Pkw
+  const PENDEL_VERKEHRSMITTEL_LABELS = {
+    eigener_pkw: 'Eigener Pkw',
+    dienstwagen: 'Dienstwagen',
+    oepv: 'Öffentliche Verkehrsmittel',
+    fahrrad: 'Fahrrad',
+    zu_fuss: 'Zu Fuß',
+    mitfahrer: 'Mitfahrer (ohne eigenes Auto)'
+  };
+  const PENDEL_OEPV_COST_CATEGORIES = { einzelticket: 'Einzelticket', abo: 'Abo / Jobticket' };
   // Reihenfolge bewusst nach Erfassungshäufigkeit (häufige Positionen zuerst,
   // Abschreibung als einmaliger Vorgang je Fahrzeug zuletzt).
   const VEHICLE_COST_CATEGORIES = {
@@ -72,6 +83,7 @@
     immoRates: loadKey('immoRates'),
     vehicleRateModes: loadKey('vehicleRateModes'),
     vehicleCosts: loadKey('vehicleCosts'),
+    pendelOepvCosts: loadKey('pendelOepvCosts'),
     settings: loadKey('settings')
   };
 
@@ -82,6 +94,7 @@
 
   let currentView = 'new';
   let currentContext = loadContext(); // 'pendeln' | 'immobilien' — persisted locally, unlike currentView
+  let guenstigerpruefungYear = String(new Date().getFullYear());
   let editingTripId = null;
   let draft = makeEmptyDraft();
   const draftsByContext = {}; // stashes each context's in-progress new-trip draft while the other is active
@@ -106,6 +119,7 @@
       vehiclePlate: '',
       objektKuerzel: '',
       verkehrsmittel: currentContext === 'immobilien' ? 'kfz' : undefined, // Immobilien only: kfz | oepv
+      pendelVerkehrsmittel: currentContext === 'pendeln' ? 'eigener_pkw' : undefined, // Pendeln only
       carrierId: null, // Immobilien + oepv only
       ticketPrice: null, // Immobilien + oepv only, optional
       note: '',
@@ -482,6 +496,45 @@
     return { pendelnKm: Math.round(pendelnKm * 10) / 10, immoKm: Math.round(immoKm * 10) / 10 };
   }
 
+  // Alles-oder-nichts-Deckelung fürs ganze Jahr: sobald auch nur eine Pendeln-Fahrt
+  // nicht mit eigenem/Dienst-Pkw stattfand, wird die gesamte Jahres-Pauschale gedeckelt.
+  function pendelPauschaleBreakdownForYear(year) {
+    let pauschaleRoh = 0;
+    let allePkw = true;
+    for (const t of state.trips) {
+      if ((t.context || 'pendeln') !== 'pendeln') continue;
+      if ((t.startDateTime || '').slice(0, 4) !== year) continue;
+      pauschaleRoh += t.cost || 0;
+      if (!['eigener_pkw', 'dienstwagen'].includes(t.pendelVerkehrsmittel || 'eigener_pkw')) allePkw = false;
+    }
+    pauschaleRoh = Math.round(pauschaleRoh * 100) / 100;
+    const pauschaleAngesetzt = allePkw ? pauschaleRoh : Math.min(pauschaleRoh, PENDLERPAUSCHALE_CAP_OHNE_PKW);
+    return { pauschaleRoh, allePkw, pauschaleAngesetzt: Math.round(pauschaleAngesetzt * 100) / 100 };
+  }
+
+  function pendelOepvCostsSumForYear(year) {
+    let sum = 0;
+    for (const c of state.pendelOepvCosts) {
+      if ((c.date || '').slice(0, 4) === year) sum += c.amount || 0;
+    }
+    return Math.round(sum * 100) / 100;
+  }
+
+  // Vergleicht Pendlerpauschale (ggf. gedeckelt) mit tatsächlichen ÖPNV-Kosten und
+  // liefert den höheren Betrag samt kurzer Begründung.
+  function guenstigerpruefungForYear(year) {
+    const { pauschaleRoh, allePkw, pauschaleAngesetzt } = pendelPauschaleBreakdownForYear(year);
+    const tatsaechlicheKosten = pendelOepvCostsSumForYear(year);
+    const werbungskosten = tatsaechlicheKosten > 0 ? Math.max(pauschaleAngesetzt, tatsaechlicheKosten) : pauschaleAngesetzt;
+    let erklaerung;
+    if (tatsaechlicheKosten > pauschaleAngesetzt) {
+      erklaerung = `Die tatsächlichen ÖPNV-Kosten (${formatEuro(tatsaechlicheKosten)}) übersteigen die Pendlerpauschale (${formatEuro(pauschaleAngesetzt)}${!allePkw ? ', gedeckelt' : ''}) — angesetzt werden ${formatEuro(werbungskosten)}.`;
+    } else {
+      erklaerung = `Die Pendlerpauschale (${formatEuro(pauschaleAngesetzt)}${!allePkw ? ', gedeckelt auf 4.500 €' : ''}) übersteigt die tatsächlichen ÖPNV-Kosten (${formatEuro(tatsaechlicheKosten)}) — angesetzt werden ${formatEuro(werbungskosten)}.`;
+    }
+    return { pauschaleRoh, allePkw, pauschaleAngesetzt, tatsaechlicheKosten, werbungskosten, erklaerung };
+  }
+
   function findApplicableRate(dateTimeStr, ratesArray = state.rates) {
     const day = (dateTimeStr || '').slice(0, 10);
     if (!day) return null;
@@ -847,6 +900,79 @@
     state.vehicleCosts = state.vehicleCosts.filter(c => c.id !== id);
     saveKey('vehicleCosts');
     if (cost) recomputeTripsForVehicle(cost.plate);
+    render();
+  }
+
+  function openPendelOepvCostEditor(costId) {
+    closeSheet();
+    const existing = costId ? state.pendelOepvCosts.find(c => c.id === costId) : null;
+    const backdrop = document.createElement('div');
+    backdrop.id = 'sheet-backdrop';
+    backdrop.className = 'sheet-backdrop';
+    backdrop.innerHTML = `
+      <div class="sheet" role="dialog">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+          <h2>${existing ? 'ÖPNV-Kosten bearbeiten' : 'ÖPNV-Kosten erfassen'}</h2>
+          <button class="btn-text" id="sheet-close">Abbrechen</button>
+        </div>
+        <form id="pendel-oepv-cost-form" style="padding: 4px 18px 20px;">
+          <div class="field">
+            <label for="poc-category">Kategorie</label>
+            <select id="poc-category">
+              ${Object.entries(PENDEL_OEPV_COST_CATEGORIES).map(([k, label]) => `<option value="${k}" ${existing && existing.category === k ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field" style="margin-top:10px;">
+            <label for="poc-date">Datum</label>
+            <input type="date" id="poc-date" value="${escapeHtml(existing ? existing.date : todayDateStr())}">
+          </div>
+          <div class="field" style="margin-top:10px;">
+            <label for="poc-amount">Betrag</label>
+            <div class="input-suffix"><input type="text" inputmode="decimal" id="poc-amount" placeholder="0,00" value="${existing ? escapeHtml(String(existing.amount).replace('.', ',')) : ''}"><span class="suffix">€</span></div>
+          </div>
+          <div class="field" style="margin-top:10px;">
+            <label for="poc-note">Notiz (optional)</label>
+            <input type="text" id="poc-note" placeholder="z. B. Jobticket Januar–Juni" maxlength="200" value="${existing && existing.note ? escapeHtml(existing.note) : ''}">
+          </div>
+          <button type="submit" class="btn-primary" id="poc-save" style="margin-top:14px;">Speichern</button>
+        </form>
+      </div>
+    `;
+    appendSheet(backdrop);
+    backdrop.querySelector('#sheet-close').addEventListener('click', closeSheet);
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) closeSheet(); });
+    backdrop.querySelector('#pendel-oepv-cost-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      savePendelOepvCost(costId, {
+        category: backdrop.querySelector('#poc-category').value,
+        date: backdrop.querySelector('#poc-date').value,
+        amount: parseFloat(backdrop.querySelector('#poc-amount').value.replace(',', '.')),
+        note: backdrop.querySelector('#poc-note').value.trim() || null
+      });
+    });
+    setTimeout(() => backdrop.querySelector('#poc-date').focus(), 50);
+  }
+
+  function savePendelOepvCost(costId, data) {
+    if (!data.date || isNaN(data.amount) || data.amount <= 0) {
+      toast('Bitte gültiges Datum und Betrag angeben');
+      return;
+    }
+    const idx = state.pendelOepvCosts.findIndex(c => c.id === costId);
+    const entry = { id: costId || uid(), category: data.category, date: data.date, amount: data.amount, note: data.note || null };
+    if (idx >= 0) state.pendelOepvCosts[idx] = entry; else state.pendelOepvCosts.push(entry);
+    saveKey('pendelOepvCosts');
+    toast('ÖPNV-Kosten gespeichert');
+    closeSheet();
+    render();
+  }
+
+  async function deletePendelOepvCost(id) {
+    const ok = await confirmDialog('Diese Kostenposition löschen?');
+    if (!ok) return;
+    state.pendelOepvCosts = state.pendelOepvCosts.filter(c => c.id !== id);
+    saveKey('pendelOepvCosts');
     render();
   }
 
@@ -1231,6 +1357,13 @@
     render();
   }
 
+  function setDraftPendelVerkehrsmittel(mode) {
+    if (draft.pendelVerkehrsmittel === mode) return;
+    draft.pendelVerkehrsmittel = mode;
+    if (!['eigener_pkw', 'dienstwagen'].includes(mode)) draft.vehiclePlate = '';
+    render();
+  }
+
   // Dispatches an address chosen in openAddressSearch to wherever it belongs:
   // the in-progress trip draft ('start'/'end'/'waypoint-N'), or a
   // Settings-level default ('settings-home'/'settings-work'), which just
@@ -1389,25 +1522,31 @@
       ? draft.waypoints.length >= 2 && draft.waypoints.every((id) => id)
       : !!(draft.startLocationId && draft.endLocationId);
     const isOepv = draft.context === 'immobilien' && draft.verkehrsmittel === 'oepv';
-    const hasTransport = isOepv ? !!draft.carrierId : !!draft.vehiclePlate;
+    const needsVehiclePlate = draft.context === 'immobilien'
+      ? !isOepv
+      : ['eigener_pkw', 'dienstwagen'].includes(draft.pendelVerkehrsmittel || 'eigener_pkw');
+    const hasTransport = isOepv ? !!draft.carrierId : (needsVehiclePlate ? !!draft.vehiclePlate : true);
     if (!hasRoute || !draft.startDateTime || !hasTransport) return false;
     if (draft.context === 'immobilien' && !draft.objektKuerzel) return false;
     return true;
   }
 
   async function saveTrip() {
+    const needsVehiclePlate = draft.context === 'immobilien'
+      ? !(draft.verkehrsmittel === 'oepv')
+      : ['eigener_pkw', 'dienstwagen'].includes(draft.pendelVerkehrsmittel || 'eigener_pkw');
     if (!validateDraft()) {
       const isImmoWaypoints = draft.context === 'immobilien' && Array.isArray(draft.waypoints);
       const isOepv = draft.context === 'immobilien' && draft.verkehrsmittel === 'oepv';
       const transportWord = isOepv ? 'Verkehrsmittel' : 'Fahrzeug';
-      toast(isImmoWaypoints ? `Bitte alle Stopps, Datum, ${transportWord} und Objekt angeben` : (draft.context === 'immobilien' ? `Bitte Start, Ziel, Datum, ${transportWord} und Objekt angeben` : 'Bitte Start, Ziel, Datum und Fahrzeug angeben'));
+      toast(isImmoWaypoints ? `Bitte alle Stopps, Datum, ${transportWord} und Objekt angeben` : (draft.context === 'immobilien' ? `Bitte Start, Ziel, Datum, ${transportWord} und Objekt angeben` : `Bitte Start, Ziel und Datum${needsVehiclePlate ? ' und Fahrzeug' : ''} angeben`));
       return;
     }
     const isImmoWaypoints = draft.context === 'immobilien' && Array.isArray(draft.waypoints);
     const isOepv = draft.context === 'immobilien' && draft.verkehrsmittel === 'oepv';
     const startLoc = isImmoWaypoints ? null : findLocation(draft.startLocationId);
     const endLoc = isImmoWaypoints ? null : findLocation(draft.endLocationId);
-    const veh = isOepv ? null : state.vehicles.find(v => v.plate === draft.vehiclePlate);
+    const veh = (isOepv || !needsVehiclePlate) ? null : state.vehicles.find(v => v.plate === draft.vehiclePlate);
 
     if (editingTripId) {
       const trip = state.trips.find(t => t.id === editingTripId);
@@ -1421,9 +1560,10 @@
         legs: draft.legs || null,
         startDateTime: draft.startDateTime,
         endDateTime: draft.endDateTime,
-        vehiclePlate: draft.vehiclePlate,
+        vehiclePlate: needsVehiclePlate ? draft.vehiclePlate : null,
         objektKuerzel: draft.objektKuerzel || null,
         verkehrsmittel: draft.context === 'immobilien' ? (draft.verkehrsmittel || 'kfz') : null,
+        pendelVerkehrsmittel: draft.context === 'pendeln' ? (draft.pendelVerkehrsmittel || 'eigener_pkw') : null,
         carrierId: isOepv ? draft.carrierId : null,
         ticketPrice: isOepv ? (draft.ticketPrice != null ? draft.ticketPrice : null) : null,
         note: draft.note,
@@ -1462,9 +1602,10 @@
         distanceError: null,
         startDateTime: draft.startDateTime,
         endDateTime: draft.endDateTime,
-        vehiclePlate: draft.vehiclePlate,
+        vehiclePlate: needsVehiclePlate ? draft.vehiclePlate : null,
         objektKuerzel: draft.objektKuerzel || null,
         verkehrsmittel: draft.context === 'immobilien' ? (draft.verkehrsmittel || 'kfz') : null,
+        pendelVerkehrsmittel: draft.context === 'pendeln' ? (draft.pendelVerkehrsmittel || 'eigener_pkw') : null,
         carrierId: isOepv ? draft.carrierId : null,
         ticketPrice: isOepv ? (draft.ticketPrice != null ? draft.ticketPrice : null) : null,
         note: draft.note,
@@ -1520,6 +1661,7 @@
       // Legacy Immobilien trips saved before ÖPV existed (Phase 1-5) have no
       // verkehrsmittel field — treat them as Kfz, matching their actual data.
       verkehrsmittel: trip.context === 'immobilien' ? (trip.verkehrsmittel || 'kfz') : undefined,
+      pendelVerkehrsmittel: (trip.context || 'pendeln') === 'pendeln' ? (trip.pendelVerkehrsmittel || 'eigener_pkw') : undefined,
       carrierId: trip.carrierId || null,
       ticketPrice: trip.ticketPrice != null ? trip.ticketPrice : null,
       note: trip.note,
@@ -2094,6 +2236,7 @@
       immoRates: state.immoRates,
       vehicleRateModes: state.vehicleRateModes,
       vehicleCosts: state.vehicleCosts,
+      pendelOepvCosts: state.pendelOepvCosts,
       routeCache: state.routeCache,
       settings: state.settings
     };
@@ -2113,7 +2256,7 @@
 
   async function importBackupFile(file) {
     const cloudNote = currentUser ? ' Da du angemeldet bist, wird dies auch mit all deinen anderen angemeldeten Geräten synchronisiert.' : '';
-    const ok = await confirmDialog(`Dies ersetzt ALLE aktuellen Daten (Reisen, Adressen, Fahrzeuge, Objekte, Verkehrsmittel, Anlass-Vorschläge, Sätze, Kilometersatz-Arten, Fahrzeugkosten, API-Key) durch den Inhalt der Backup-Datei.${cloudNote} Fortfahren?`, 'Ersetzen');
+    const ok = await confirmDialog(`Dies ersetzt ALLE aktuellen Daten (Reisen, Adressen, Fahrzeuge, Objekte, Verkehrsmittel, Anlass-Vorschläge, Sätze, Kilometersatz-Arten, Fahrzeugkosten, ÖPNV-Kosten, API-Key) durch den Inhalt der Backup-Datei.${cloudNote} Fortfahren?`, 'Ersetzen');
     if (!ok) return;
     try {
       const text = await file.text();
@@ -2129,6 +2272,7 @@
       state.immoRates = Array.isArray(data.immoRates) ? data.immoRates : [];
       state.vehicleRateModes = Array.isArray(data.vehicleRateModes) ? data.vehicleRateModes : [];
       state.vehicleCosts = Array.isArray(data.vehicleCosts) ? data.vehicleCosts : [];
+      state.pendelOepvCosts = Array.isArray(data.pendelOepvCosts) ? data.pendelOepvCosts : [];
       state.routeCache = (data.routeCache && typeof data.routeCache === 'object') ? data.routeCache : {};
       state.settings = (data.settings && typeof data.settings === 'object') ? data.settings : { orsApiKey: '' };
       saveKey('trips');
@@ -2141,6 +2285,7 @@
       saveKey('immoRates');
       saveKey('vehicleRateModes');
       saveKey('vehicleCosts');
+      saveKey('pendelOepvCosts');
       saveKey('routeCache');
       saveKey('settings');
       toast('Backup importiert');
@@ -2151,7 +2296,7 @@
   }
 
   // ---------- Cloud sync (Firebase) ----------
-  const CLOUD_SYNCED_KEYS = ['trips', 'locations', 'vehicles', 'objekte', 'carriers', 'noteSuggestions', 'rates', 'immoRates', 'vehicleRateModes', 'vehicleCosts', 'settings']; // not routeCache: regenerable, no data-loss risk
+  const CLOUD_SYNCED_KEYS = ['trips', 'locations', 'vehicles', 'objekte', 'carriers', 'noteSuggestions', 'rates', 'immoRates', 'vehicleRateModes', 'vehicleCosts', 'pendelOepvCosts', 'settings']; // not routeCache: regenerable, no data-loss risk
 
   const firebaseConfig = {
     apiKey: 'AIzaSyDLfAXQUAWnv31czdwS_u4OZ_FnTlTolbI',
@@ -2720,6 +2865,7 @@
     const endLoc = draft.endLocationId ? findLocation(draft.endLocationId) : null;
     const isOepv = currentContext === 'immobilien' && draft.verkehrsmittel === 'oepv';
     const carrier = draft.carrierId ? findCarrier(draft.carrierId) : null;
+    const pendelNeedsVehicle = currentContext === 'pendeln' && ['eigener_pkw', 'dienstwagen'].includes(draft.pendelVerkehrsmittel || 'eigener_pkw');
 
     return `
       <div class="section-title">${editingTripId ? 'Reise bearbeiten' : 'Neue Reise'}</div>
@@ -2778,18 +2924,27 @@
             <button type="button" class="${isOepv ? 'active' : ''}" data-verkehrsmittel="oepv">ÖPV</button>
           </div>
         </div>` : ''}
+        ${currentContext === 'pendeln' ? `
+        <div class="field">
+          <label>Verkehrsmittel</label>
+          <select id="pendel-verkehrsmittel-select">
+            ${Object.entries(PENDEL_VERKEHRSMITTEL_LABELS).map(([k, label]) => `<option value="${k}" ${(draft.pendelVerkehrsmittel || 'eigener_pkw') === k ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')}
+          </select>
+        </div>` : ''}
         ${!isOepv ? `
         <div class="field">
           <label>${currentContext === 'immobilien' ? 'Kilometersatz' : 'Pendlerpauschale'}</label>
           ${rateBoxHtml(draft)}
-        </div>
+        </div>` : ''}
+        ${(currentContext === 'immobilien' && !isOepv) || pendelNeedsVehicle ? `
         <div class="field">
           <label>Fahrzeug</label>
           <button class="picker-trigger" id="btn-pick-vehicle">
             <span class="${draft.vehiclePlate ? '' : 'placeholder'}">${draft.vehiclePlate ? escapeHtml(draft.vehiclePlate) : 'Kennzeichen wählen'}</span>
             <span class="chev">›</span>
           </button>
-        </div>` : `
+        </div>` : ''}
+        ${isOepv ? `
         <div class="field">
           <label>Anbieter</label>
           <button class="picker-trigger" id="btn-pick-carrier">
@@ -2801,7 +2956,7 @@
           <label>Ticketpreis (optional)</label>
           <div class="input-suffix has-clear"><input type="text" inputmode="decimal" id="ticket-price-input" placeholder="0,00" value="${draft.ticketPrice != null ? escapeHtml(String(draft.ticketPrice).replace('.', ',')) : ''}"><button type="button" class="input-clear" data-clear-target="ticket-price-input" aria-label="Eingabe löschen">×</button><span class="suffix">€</span></div>
           ${draft.ticketPrice == null ? '<div class="hint warn-text">Ticketpreis fehlt — Reise kann trotzdem gespeichert werden</div>' : ''}
-        </div>`}
+        </div>` : ''}
         ${currentContext === 'immobilien' ? `
         <div class="field">
           <label>Objekt</label>
@@ -2853,6 +3008,10 @@
     document.querySelectorAll('[data-verkehrsmittel]').forEach((btn) => {
       btn.addEventListener('click', () => setDraftVerkehrsmittel(btn.getAttribute('data-verkehrsmittel')));
     });
+    const pendelVerkehrsmittelSelect = document.getElementById('pendel-verkehrsmittel-select');
+    if (pendelVerkehrsmittelSelect) {
+      pendelVerkehrsmittelSelect.addEventListener('change', () => setDraftPendelVerkehrsmittel(pendelVerkehrsmittelSelect.value));
+    }
     const pickCarrierBtn = document.getElementById('btn-pick-carrier');
     if (pickCarrierBtn) pickCarrierBtn.addEventListener('click', openCarrierPicker);
     const ticketPriceEl = document.getElementById('ticket-price-input');
@@ -3046,6 +3205,29 @@
         </div>`).join('')
       : `<div class="hint">Noch keine Pendlerpauschale hinterlegt. Ohne Satz werden keine Kosten berechnet.</div>`;
 
+    const pendelOepvCostRows = state.pendelOepvCosts.length
+      ? [...state.pendelOepvCosts].sort((a, b) => b.date.localeCompare(a.date)).map(c => `
+        <div class="manage-row" style="flex-direction:column; align-items:stretch; gap:8px; padding:8px 0;">
+          <div>
+            <div>${escapeHtml(PENDEL_OEPV_COST_CATEGORIES[c.category] || c.category)}</div>
+            <div class="sub">${formatDateOnly(c.date)} · ${formatEuro(c.amount)}${c.note ? ' · ' + escapeHtml(c.note) : ''}</div>
+          </div>
+          <div style="display:flex; gap:16px;">
+            <button class="btn-text" data-edit-pendel-oepv-cost="${escapeHtml(c.id)}">Bearbeiten</button>
+            <button class="btn-danger" data-del-pendel-oepv-cost="${escapeHtml(c.id)}">Löschen</button>
+          </div>
+        </div>`).join('')
+      : `<div class="hint" style="margin:0;">Noch keine ÖPNV-Kosten erfasst.</div>`;
+
+    const gp = guenstigerpruefungForYear(guenstigerpruefungYear);
+    const guenstigerpruefungBoxHtml = `
+      <div style="text-align:center; background:var(--bg-elevated); border-radius:10px; padding:14px 10px; margin-bottom:14px;">
+        <div style="font-size:11px; color:var(--text-faint); text-transform:uppercase; letter-spacing:0.5px;">Werbungskosten Pendeln ${escapeHtml(guenstigerpruefungYear)}</div>
+        <div style="font-size:30px; font-weight:700; color:var(--accent); line-height:1.2;">${formatEuro(gp.werbungskosten)}</div>
+        <div style="font-size:13px; color:var(--text-dim); margin-top:2px;">Pauschale: ${formatEuro(gp.pauschaleAngesetzt)}${!gp.allePkw ? ' (gedeckelt)' : ''} · ÖPNV-Kosten: ${formatEuro(gp.tatsaechlicheKosten)}</div>
+      </div>
+      <div class="hint" style="margin:0 0 14px;">${escapeHtml(gp.erklaerung)}</div>`;
+
     const tabelleRatesForPlateHtml = (plate) => {
       const rows = state.immoRates.filter(r => r.rateType === 'tabelle' && r.plate === plate)
         .sort((a, b) => b.validFrom.localeCompare(a.validFrom))
@@ -3233,6 +3415,20 @@
           </div>
         </div>
         <div class="hint">Werden beim Anlegen einer neuen Pendeln-Reise automatisch als Start bzw. Ziel vorgeschlagen — bleiben pro Reise änderbar.</div>
+      </div>
+
+      <div class="section-title">Günstigerprüfung</div>
+      <div class="card">
+        <div class="field" style="margin-bottom:14px;">
+          <label for="gp-year">Jahr</label>
+          <select id="gp-year">
+            ${(() => { const cy = new Date().getFullYear(); const opts = []; for (let y = cy + 1; y >= cy - 14; y--) opts.push(`<option value="${y}" ${String(y) === guenstigerpruefungYear ? 'selected' : ''}>${y}</option>`); return opts.join(''); })()}
+          </select>
+        </div>
+        ${guenstigerpruefungBoxHtml}
+        <div class="hint" style="margin:0 0 8px;">Tatsächliche ÖPNV-Kosten (Abo/Jobticket, Einzeltickets):</div>
+        ${pendelOepvCostRows}
+        <button class="btn-secondary" id="btn-add-pendel-oepv-cost" style="margin-top:14px;">+ Kosten erfassen</button>
       </div>` : ''}
 
       <div class="section-title">Routing</div>
@@ -3387,6 +3583,18 @@
     }
     document.querySelectorAll('[data-del-rate]').forEach(btn => {
       btn.addEventListener('click', () => deleteRate(btn.getAttribute('data-del-rate')));
+    });
+    const gpYearSelect = document.getElementById('gp-year');
+    if (gpYearSelect) {
+      gpYearSelect.addEventListener('change', () => { guenstigerpruefungYear = gpYearSelect.value; render(); });
+    }
+    const addPendelOepvCostBtn = document.getElementById('btn-add-pendel-oepv-cost');
+    if (addPendelOepvCostBtn) addPendelOepvCostBtn.addEventListener('click', () => openPendelOepvCostEditor(null));
+    document.querySelectorAll('[data-edit-pendel-oepv-cost]').forEach(btn => {
+      btn.addEventListener('click', () => openPendelOepvCostEditor(btn.getAttribute('data-edit-pendel-oepv-cost')));
+    });
+    document.querySelectorAll('[data-del-pendel-oepv-cost]').forEach(btn => {
+      btn.addEventListener('click', () => deletePendelOepvCost(btn.getAttribute('data-del-pendel-oepv-cost')));
     });
     const addImmoRateBtn = document.getElementById('btn-add-immo-rate');
     if (addImmoRateBtn) addImmoRateBtn.addEventListener('click', addPauschalRate);
